@@ -30,91 +30,213 @@ auth = GolikeAuth(
     signing_key="...",           # browser: store.state.signing_key
     user_id=123456,
     username="your_username",
-    device_id=None,              # optional fixed UUID; auto-generate if None
+    device_id="32484704-8a4e-4909-9d42-866773b321d6",  # nên giữ cố định
 )
+```
 
-# ---- ANY API: method + path + (optional) body ----
-# GET (no body) — jobs list
+Lib dùng được với **mọi** path gateway. Chỉ cần đúng **method + path + body/query** như browser.
+
+### Cách dùng chung (khuyến nghị)
+
+```python
+# GET — không body, params = query string
+r = auth.get("/path/to/api", params={"key": "value"})
+print(r.status_code, r.json())
+
+# POST — có JSON body (g-auth ký đúng body compact, không space)
+r = auth.post("/path/to/api", json={"a": 1, "b": "x"})
+print(r.status_code, r.json())
+
+# method bất kỳ
+r = auth.request("PUT", "/path/to/api", json={...})
+r = auth.request("DELETE", "/path/to/api")
+```
+
+### Ví dụ thật theo platform
+
+#### Instagram — lấy job (GET)
+
+```python
 r = auth.get(
     "/advertising/publishers/instagram/jobs",
-    params={"instagram_account_id": "966624", "data": "null"},
+    params={
+        "instagram_account_id": "966624",
+        "data": "null",
+    },
 )
+# hoặc helper:
+r = auth.get_instagram_job("966624")
+print(r.json())
+```
 
-# POST + JSON — skip job  (NOT GET → 405 Method Not Allowed)
+#### Instagram — skip job (POST, không phải GET!)
+
+```python
 r = auth.post(
     "/advertising/publishers/instagram/skip-jobs",
     json={
-        "ads_id": 620959,
-        "object_id": "DVqiLjHj6Gu",
+        "ads_id": 620978,
+        "object_id": "6155111723",
         "account_id": 966624,
-        "type": "comment",
+        "type": "follow",  # follow | like | comment | ...
     },
 )
+# hoặc helper:
+r = auth.skip_instagram_job(
+    ads_id=620978,
+    object_id="6155111723",
+    account_id=966624,
+    type="follow",
+)
+print(r.json())
+```
 
-# POST complete
+#### Instagram — complete job (POST)
+
+```python
 r = auth.post(
     "/advertising/publishers/instagram/complete-jobs",
     json={
-        "instagram_users_advertising_id": 620959,
+        "instagram_users_advertising_id": 620978,
         "instagram_account_id": 966624,
         "async": True,
         "data": None,
     },
 )
-
-# generic
-r = auth.request("POST", "/some/other/path", json={"a": 1})
+# hoặc helper:
+r = auth.complete_instagram_job(
+    instagram_users_advertising_id=620978,
+    instagram_account_id=966624,
+)
+print(r.json())
 ```
 
-### Instagram helpers
+#### Twitter / X — lấy job (GET)
+
+Tương đương curl:
+
+`GET /api/advertising/publishers/twitter/jobs?account_id=97445`
 
 ```python
-r = auth.get_instagram_job("966624")
+r = auth.get(
+    "/advertising/publishers/twitter/jobs",
+    params={"account_id": "97445"},
+)
+print(r.status_code, r.json())
+```
 
-r = auth.skip_instagram_job(
-    ads_id=620959,
-    object_id="DVqiLjHj6Gu",
-    account_id=966624,
-    type="comment",  # follow | like | comment | ...
+#### TikTok / Facebook / … (cùng pattern)
+
+```python
+# GET jobs (query tùy platform — copy từ Network tab browser)
+r = auth.get(
+    "/advertising/publishers/tiktok/jobs",
+    params={"account_id": "123"},  # hoặc param khác tùy API
 )
 
-r = auth.complete_instagram_job(
-    instagram_users_advertising_id=620959,
-    instagram_account_id=966624,
+# POST skip / complete — luôn dùng auth.post(..., json={...})
+r = auth.post(
+    "/advertising/publishers/tiktok/skip-jobs",
+    json={...},  # body copy từ Network tab
+)
+```
+
+#### Users / endpoint khác
+
+```python
+r = auth.get("/users/me")
+r = auth.post("/some/path", json={"foo": "bar"})
+```
+
+### Sai thường gặp
+
+```python
+# ❌ SAI: auth.post() đã gọi API, không phải headers
+# ❌ SAI: skip-jobs dùng GET → 405
+response = requests.get(
+    "https://gateway.golike.net/api/advertising/publishers/instagram/skip-jobs",
+    headers=auth.post("/advertising/publishers/instagram/skip-jobs", json={...}),
+)
+
+# ✅ ĐÚNG
+response = auth.post(
+    "/advertising/publishers/instagram/skip-jobs",
+    json={
+        "ads_id": 620978,
+        "object_id": "6155111723",
+        "account_id": 966624,
+        "type": "follow",
+    },
+)
+print(response.json())
+```
+
+Nếu tự dùng `requests`, **method + body bytes** phải khớp lúc ký:
+
+```python
+import json
+import requests
+
+body = {
+    "ads_id": 620978,
+    "object_id": "6155111723",
+    "account_id": 966624,
+    "type": "follow",
+}
+raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False)  # không space
+headers = auth.headers(
+    "POST",
+    "/advertising/publishers/instagram/skip-jobs",
+    body=raw,
+)
+response = requests.post(
+    "https://gateway.golike.net/api/advertising/publishers/instagram/skip-jobs",
+    headers=headers,
+    data=raw.encode("utf-8"),
 )
 ```
 
 ### Headers only / low-level
 
 ```python
-# must match real method + path + body used in the HTTP call
+from golike_gauth import generate_g_auth, generate_device_id, decode_g_auth
+
+# headers: method/path/body phải trùng request thật
 headers = auth.headers(
-    "POST",
-    "/advertising/publishers/instagram/skip-jobs",
-    body='{"ads_id":1,"object_id":"x","account_id":2,"type":"follow"}',
+    "GET",
+    "/advertising/publishers/twitter/jobs",
+    body="",  # GET không body
 )
 
-from golike_gauth import generate_g_auth, generate_device_id, decode_g_auth
 g_auth = generate_g_auth(
-    method="POST",
-    path="/advertising/publishers/instagram/skip-jobs",
-    body={"ads_id": 1, "object_id": "x", "account_id": 2, "type": "follow"},
+    method="GET",
+    path="/advertising/publishers/twitter/jobs",
+    body="",
     signing_key="...",
     device_id=generate_device_id(),
     user_id=123456,
 )
+print(decode_g_auth(g_auth, "..."))
 ```
 
-### Method cheatsheet (Instagram)
+### Method cheatsheet
 
-| API | Method | Body |
+| API | Method | Params / Body |
 |---|---|---|
-| `/advertising/publishers/instagram/jobs` | **GET** | query only |
-| `/advertising/publishers/instagram/skip-jobs` | **POST** | `{ads_id, object_id, account_id, type}` |
-| `/advertising/publishers/instagram/complete-jobs` | **POST** | `{instagram_users_advertising_id, instagram_account_id, async, data, ...}` |
+| `/advertising/publishers/instagram/jobs` | **GET** | query: `instagram_account_id`, `data` |
+| `/advertising/publishers/instagram/skip-jobs` | **POST** | JSON: `{ads_id, object_id, account_id, type}` |
+| `/advertising/publishers/instagram/complete-jobs` | **POST** | JSON: `{instagram_users_advertising_id, instagram_account_id, async, data, ...}` |
+| `/advertising/publishers/twitter/jobs` | **GET** | query: `account_id` |
+| `/users/me` | **GET** | — |
+| path khác | copy từ browser Network | **đúng method + body như browser** |
 
-> **405** = wrong HTTP method (e.g. GET on `skip-jobs`).  
-> **g-auth** must be signed with the **same** method + path + body bytes as the request.
+Quy tắc:
+
+1. **GET** → `auth.get(path, params=...)` — body ký = `""`
+2. **POST** → `auth.post(path, json=...)` — body ký = JSON compact
+3. **405** = sai method (vd. GET `skip-jobs`)
+4. **g-auth** tạo mới **mỗi request**, khớp method + path + body
+5. Path truyền vào **không** cần `/api` prefix (`auth` tự thêm base `.../api`)
 
 ## Where to get `signing_key`
 
