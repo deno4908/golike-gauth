@@ -385,7 +385,7 @@ def decrypt_g_auth(token: str, signing_key: str) -> dict:
     return json.loads(pt)
 ```
 
-Thư viện sẵn: package `golike-gauth` (`pip install` / local `pip install -e .`).
+Thư viện: [golike-gauth](https://github.com/deno4908/golike-gauth) — `pip install golike-gauth`
 
 ---
 
