@@ -1,0 +1,118 @@
+Metadata-Version: 2.4
+Name: golike-gauth
+Version: 0.1.0
+Summary: Generate valid g-auth / g-device-id headers for Golike gateway API
+Author: golike-gauth contributors
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/example/golike-gauth
+Project-URL: Issues, https://github.com/example/golike-gauth/issues
+Keywords: golike,g-auth,gauth,aes-gcm,hkdf
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Security :: Cryptography
+Classifier: Topic :: Internet :: WWW/HTTP
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: cryptography>=41
+Provides-Extra: requests
+Requires-Dist: requests>=2.28; extra == "requests"
+Provides-Extra: dev
+Requires-Dist: build; extra == "dev"
+Requires-Dist: twine; extra == "dev"
+Requires-Dist: requests>=2.28; extra == "dev"
+Dynamic: license-file
+
+# golike-gauth
+
+Generate valid **`g-auth`** / **`g-device-id`** headers for the Golike gateway API.
+
+## Install
+
+```bash
+pip install golike-gauth
+# optional HTTP helper
+pip install golike-gauth[requests]
+```
+
+## Quick start
+
+```python
+from golike_gauth import GolikeAuth
+
+auth = GolikeAuth(
+    token="eyJ...",                 # JWT Bearer
+    signing_key="cxbbf6td1EXc...",  # from browser store.state.signing_key
+    user_id=639111,
+    username="vinhhacker",
+    device_id="32484704-8a4e-4909-9d42-866773b321d6",  # optional, keep stable
+)
+
+# headers only
+headers = auth.headers("GET", "/advertising/publishers/instagram/jobs", body="")
+
+# full signed request (needs: pip install requests)
+resp = auth.get_instagram_job("966624")
+print(resp.status_code, resp.json())
+```
+
+### Low-level API
+
+```python
+from golike_gauth import generate_g_auth, generate_device_id, decode_g_auth
+
+device_id = generate_device_id()
+token = generate_g_auth(
+    method="GET",
+    path="/advertising/publishers/instagram/jobs",
+    body="",
+    signing_key="...",
+    device_id=device_id,
+    user_id=639111,
+)
+print(decode_g_auth(token, "..."))
+```
+
+## Where to get `signing_key`
+
+On https://app.golike.net (logged in), DevTools console:
+
+```js
+document.querySelector('#app').__vue__.$store.state.signing_key
+```
+
+> Note: this may differ from `data.firebase_id` in `/users/me`. Always use the store value that the browser actually signs with.
+
+## CLI
+
+```bash
+golike-gauth --token eyJ... --signing-key ... --user-id 639111 --username vinhhacker \
+  --device-id 32484704-8a4e-4909-9d42-866773b321d6 \
+  --call --ig-account-id 966624
+```
+
+## Notes
+
+- `g-auth` must be **regenerated for every request** (binds method + path + body hash + timestamp).
+- GET requests sign body as empty string `""`.
+- Path signed is pathname only, e.g. `/api/advertising/publishers/instagram/jobs`.
+
+## Publish to PyPI
+
+```bash
+cd golike-gauth
+python -m pip install -U build twine
+python -m build
+python -m twine upload dist/*
+```
+
+## License
+
+MIT

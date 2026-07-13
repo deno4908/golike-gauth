@@ -1,0 +1,2 @@
+[console_scripts]
+golike-gauth = golike_gauth.cli:main

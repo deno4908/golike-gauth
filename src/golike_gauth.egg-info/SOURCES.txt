@@ -1,0 +1,12 @@
+LICENSE
+README.md
+pyproject.toml
+src/golike_gauth/__init__.py
+src/golike_gauth/cli.py
+src/golike_gauth/core.py
+src/golike_gauth.egg-info/PKG-INFO
+src/golike_gauth.egg-info/SOURCES.txt
+src/golike_gauth.egg-info/dependency_links.txt
+src/golike_gauth.egg-info/entry_points.txt
+src/golike_gauth.egg-info/requires.txt
+src/golike_gauth.egg-info/top_level.txt

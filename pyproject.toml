@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "golike-gauth"
+version = "0.1.0"
+description = "Generate valid g-auth / g-device-id headers for Golike gateway API"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [{ name = "golike-gauth contributors" }]
+keywords = ["golike", "g-auth", "gauth", "aes-gcm", "hkdf"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security :: Cryptography",
+  "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+  "cryptography>=41",
+]
+
+[project.optional-dependencies]
+requests = ["requests>=2.28"]
+dev = ["build", "twine", "requests>=2.28"]
+
+[project.urls]
+Homepage = "https://github.com/example/golike-gauth"
+Issues = "https://github.com/example/golike-gauth/issues"
+
+[project.scripts]
+golike-gauth = "golike_gauth.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
