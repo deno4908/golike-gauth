@@ -8,9 +8,14 @@ auth = GolikeAuth(
     device_id=None,  # auto UUID, or pass fixed UUID
 )
 
-headers = auth.headers("GET", "/advertising/publishers/instagram/jobs", body="")
-print(headers["g-auth"][:48], "...")
-print(auth.decode(headers["g-auth"]))
+# GET jobs
+# print(auth.get_instagram_job("ACCOUNT_ID").json())
 
-# resp = auth.get_instagram_job("ACCOUNT_ID")
-# print(resp.json())
+# POST skip (not GET!)
+# print(auth.skip_instagram_job(
+#     ads_id=1, object_id="xxx", account_id=2, type="follow"
+# ).json())
+
+# any path
+# print(auth.post("/advertising/publishers/tiktok/skip-jobs", json={...}).json())
+# print(auth.get("/users/me").json())

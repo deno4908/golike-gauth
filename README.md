@@ -33,30 +33,88 @@ auth = GolikeAuth(
     device_id=None,              # optional fixed UUID; auto-generate if None
 )
 
-# headers only (g-auth is fresh every call)
-headers = auth.headers("GET", "/advertising/publishers/instagram/jobs", body="")
+# ---- ANY API: method + path + (optional) body ----
+# GET (no body) — jobs list
+r = auth.get(
+    "/advertising/publishers/instagram/jobs",
+    params={"instagram_account_id": "966624", "data": "null"},
+)
 
-# full signed request (requires: pip install requests)
-resp = auth.get_instagram_job("YOUR_IG_ACCOUNT_ID")
-print(resp.status_code, resp.json())
+# POST + JSON — skip job  (NOT GET → 405 Method Not Allowed)
+r = auth.post(
+    "/advertising/publishers/instagram/skip-jobs",
+    json={
+        "ads_id": 620959,
+        "object_id": "DVqiLjHj6Gu",
+        "account_id": 966624,
+        "type": "comment",
+    },
+)
+
+# POST complete
+r = auth.post(
+    "/advertising/publishers/instagram/complete-jobs",
+    json={
+        "instagram_users_advertising_id": 620959,
+        "instagram_account_id": 966624,
+        "async": True,
+        "data": None,
+    },
+)
+
+# generic
+r = auth.request("POST", "/some/other/path", json={"a": 1})
 ```
 
-### Low-level API
+### Instagram helpers
 
 ```python
-from golike_gauth import generate_g_auth, generate_device_id, decode_g_auth
+r = auth.get_instagram_job("966624")
 
-device_id = generate_device_id()
+r = auth.skip_instagram_job(
+    ads_id=620959,
+    object_id="DVqiLjHj6Gu",
+    account_id=966624,
+    type="comment",  # follow | like | comment | ...
+)
+
+r = auth.complete_instagram_job(
+    instagram_users_advertising_id=620959,
+    instagram_account_id=966624,
+)
+```
+
+### Headers only / low-level
+
+```python
+# must match real method + path + body used in the HTTP call
+headers = auth.headers(
+    "POST",
+    "/advertising/publishers/instagram/skip-jobs",
+    body='{"ads_id":1,"object_id":"x","account_id":2,"type":"follow"}',
+)
+
+from golike_gauth import generate_g_auth, generate_device_id, decode_g_auth
 g_auth = generate_g_auth(
-    method="GET",
-    path="/advertising/publishers/instagram/jobs",
-    body="",
+    method="POST",
+    path="/advertising/publishers/instagram/skip-jobs",
+    body={"ads_id": 1, "object_id": "x", "account_id": 2, "type": "follow"},
     signing_key="...",
-    device_id=device_id,
+    device_id=generate_device_id(),
     user_id=123456,
 )
-print(decode_g_auth(g_auth, "..."))
 ```
+
+### Method cheatsheet (Instagram)
+
+| API | Method | Body |
+|---|---|---|
+| `/advertising/publishers/instagram/jobs` | **GET** | query only |
+| `/advertising/publishers/instagram/skip-jobs` | **POST** | `{ads_id, object_id, account_id, type}` |
+| `/advertising/publishers/instagram/complete-jobs` | **POST** | `{instagram_users_advertising_id, instagram_account_id, async, data, ...}` |
+
+> **405** = wrong HTTP method (e.g. GET on `skip-jobs`).  
+> **g-auth** must be signed with the **same** method + path + body bytes as the request.
 
 ## Where to get `signing_key`
 

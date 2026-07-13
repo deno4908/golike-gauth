@@ -17,7 +17,7 @@ from .core import (
     parse_signing_key,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "APP_CLIENT",
     "APP_VERSION",

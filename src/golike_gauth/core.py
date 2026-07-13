@@ -308,68 +308,171 @@ class GolikeAuth:
     def decode(self, g_auth_token: str) -> dict:
         return decode_g_auth(g_auth_token, self.signing_key)
 
+    def _url(self, path: str) -> str:
+        if path.startswith("http"):
+            return path
+        return self.base_url + (path if path.startswith("/") else "/" + path)
+
+    @staticmethod
+    def _compact_json(obj: Any) -> str:
+        """Match JS JSON.stringify (no spaces) — body bytes must equal signed body."""
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
     def request(
         self,
         method: str,
         path: str,
         *,
         params: Optional[Mapping[str, Any]] = None,
+        json: Any = None,
         json_body: Any = None,
         data: Any = None,
         timeout: float = 30,
         session=None,
     ):
-        """Signed HTTP request via requests (optional dependency)."""
+        """
+        Signed HTTP request for ANY gateway path.
+
+        - GET/HEAD/DELETE without body → sign body as ""
+        - POST/PUT/PATCH with json=dict → sign + send compact JSON (no spaces)
+        - Do not use requests' json= yourself (it may add spaces and break q hash)
+
+        Examples:
+            auth.request("GET", "/advertising/publishers/instagram/jobs", params={...})
+            auth.request("POST", "/advertising/publishers/instagram/skip-jobs", json={...})
+        """
         import requests
 
         method_u = method.upper()
+        payload = json if json is not None else json_body
+
+        if data is not None and payload is not None:
+            raise ValueError("pass only one of data= or json=")
+
         if data is not None:
-            body: JsonBody = data if isinstance(data, (str, bytes)) else data
-            sign_body = body
-            headers = self.headers(method_u, path, body=sign_body)
-            url = path if path.startswith("http") else self.base_url + (
-                path if path.startswith("/") else "/" + path
-            )
+            if isinstance(data, (dict, list)):
+                raw = self._compact_json(data)
+                headers = self.headers(method_u, path, body=raw)
+                send: Any = raw.encode("utf-8")
+            elif isinstance(data, str):
+                headers = self.headers(method_u, path, body=data)
+                send = data.encode("utf-8")
+            elif isinstance(data, bytes):
+                headers = self.headers(method_u, path, body=data.decode("utf-8"))
+                send = data
+            else:
+                raise TypeError("data must be dict/list/str/bytes")
             return (session or requests).request(
                 method_u,
-                url,
+                self._url(path),
                 params=params,
-                data=data,
+                data=send,
                 headers=headers,
                 timeout=timeout,
             )
 
-        if json_body is not None:
-            raw = json.dumps(json_body, ensure_ascii=False, separators=(",", ":"))
+        if payload is not None:
+            raw = self._compact_json(payload)
             headers = self.headers(method_u, path, body=raw)
-            url = path if path.startswith("http") else self.base_url + (
-                path if path.startswith("/") else "/" + path
-            )
             return (session or requests).request(
                 method_u,
-                url,
+                self._url(path),
                 params=params,
                 data=raw.encode("utf-8"),
                 headers=headers,
                 timeout=timeout,
             )
 
-        # no body (GET etc.) — sign with empty string
+        # no body
         headers = self.headers(method_u, path, body="")
-        url = path if path.startswith("http") else self.base_url + (
-            path if path.startswith("/") else "/" + path
-        )
         return (session or requests).request(
-            method_u, url, params=params, headers=headers, timeout=timeout
+            method_u,
+            self._url(path),
+            params=params,
+            headers=headers,
+            timeout=timeout,
         )
 
+    def get(self, path: str, *, params: Optional[Mapping[str, Any]] = None, **kw):
+        return self.request("GET", path, params=params, **kw)
+
+    def post(self, path: str, *, json: Any = None, params=None, **kw):
+        return self.request("POST", path, json=json, params=params, **kw)
+
+    # ---- Instagram helpers (same contract as web app) ----
+
     def get_instagram_job(self, instagram_account_id: str, session=None):
-        return self.request(
-            "GET",
+        """GET /advertising/publishers/instagram/jobs"""
+        return self.get(
             "/advertising/publishers/instagram/jobs",
             params={
                 "instagram_account_id": str(instagram_account_id),
                 "data": "null",
             },
+            session=session,
+        )
+
+    def skip_instagram_job(
+        self,
+        *,
+        ads_id: int,
+        object_id: str,
+        account_id: int,
+        type: str,
+        session=None,
+    ):
+        """
+        POST /advertising/publishers/instagram/skip-jobs
+
+        Body (from JobDetail.skipJobs):
+          {ads_id, object_id, account_id, type}
+        """
+        return self.post(
+            "/advertising/publishers/instagram/skip-jobs",
+            json={
+                "ads_id": ads_id,
+                "object_id": str(object_id),
+                "account_id": account_id,
+                "type": type,
+            },
+            session=session,
+        )
+
+    def complete_instagram_job(
+        self,
+        *,
+        instagram_users_advertising_id: int,
+        instagram_account_id: int,
+        async_: bool = True,
+        data: Any = None,
+        comment_id: Optional[int] = None,
+        message: Optional[str] = None,
+        captcha: Optional[str] = None,
+        captcha_data: Any = None,
+        session=None,
+    ):
+        """
+        POST /advertising/publishers/instagram/complete-jobs
+
+        Body (from JobDetail.completeJob):
+          {instagram_users_advertising_id, instagram_account_id, async, data, ...}
+        """
+        body: dict = {
+            "instagram_users_advertising_id": instagram_users_advertising_id,
+            "instagram_account_id": instagram_account_id,
+            "async": async_,
+            "data": data,
+        }
+        if comment_id is not None:
+            body["comment_id"] = comment_id
+        if message is not None:
+            body["message"] = message
+        if captcha is not None:
+            body["captcha"] = captcha
+        if captcha_data is not None:
+            body["captcha_data"] = captcha_data
+        return self.post(
+            "/advertising/publishers/instagram/complete-jobs",
+            json=body,
             session=session,
         )
