@@ -22,13 +22,87 @@ pip install git+https://github.com/deno4908/golike-gauth.git
 
 ## Quick start
 
+### Chỉ cần token (khuyến dùng)
+
+Hầu hết trường hợp **chỉ nhập JWT**. Các tham số còn lại lấy từ API (User-Agent **mobile**).
+
+```python
+from golike_gauth import GolikeAuth
+
+auth = GolikeAuth.from_token("eyJ...")  # chỉ token
+
+print(auth.user_id)       # JWT sub
+print(auth.username)      # /users/me
+print(auth.device_id)     # UUID tự sinh
+print(auth.signing_key)   # = data.firebase_id (app web cũng set như vậy)
+print(auth.profile)       # raw /users/me
+```
+
+#### Flow `from_token` làm gì?
+
+| Bước | Nguồn | Kết quả |
+|---|---|---|
+| 1 | Decode JWT | `user_id` = `sub` |
+| 2 | `GET /users/me` (UA mobile Android) | `username`, `coin`, `firebase_id`, … |
+| 3 | `signing_key` | mặc định = **`data.firebase_id`** (trùng `store.state.signing_key` trên app) |
+| 4 | `device_id` | UUID v4 (tự tạo, nên lưu lại) |
+| 5 | (tuỳ chọn) `verify=True` | `POST /security/echo` kiểm tra key decrypt được |
+
+```python
+# verify echo (mac dinh True) — fail neu key sai
+auth = GolikeAuth.from_token("eyJ...", verify=True)
+
+# bo qua verify echo
+auth = GolikeAuth.from_token("eyJ...", verify=False)
+
+# hiếm khi firebase_id != store key → truyền tay:
+auth = GolikeAuth.from_token(
+    "eyJ...",
+    signing_key="cxbbf6td1EXc...",  # store.state.signing_key
+)
+```
+
+#### Lấy token từ đâu?
+
+Trên https://app.golike.net (đã login, F12 → Network):
+
+- Request bất kỳ → header `Authorization: Bearer eyJ...`
+- Hoặc Application / Local Storage / vuex (field `token`)
+
+`signing_key` thường **không cần** dán: app gán `store.signing_key = me.firebase_id`.
+
+#### Ví dụ: lấy job Facebook chỉ với token
+
+```python
+from golike_gauth import GolikeAuth
+
+auth = GolikeAuth.from_token("eyJ...", verify=False)
+# dam bao dung firebase_id
+if auth.profile.get("firebase_id"):
+    auth.signing_key = auth.profile["firebase_id"]
+
+# list account FB tren Golike
+accs = auth.get("/fb-account?limit=200").json().get("data") or []
+fb_id = accs[0]["fb_id"]
+
+r = auth.get(
+    f"/advertising/publishers/get-jobs-2026"
+    f"?fb_id={fb_id}&server=sv2&high_job=1&low_job=1"
+)
+print(r.status_code, r.json())
+```
+
+Script mẫu trong workspace: `test_fb_jobs.py` (chỉ hỏi token).
+
+### Thủ công (5 trường)
+
 ```python
 from golike_gauth import GolikeAuth
 
 auth = GolikeAuth(
     token="eyJ...",              # JWT Bearer
-    signing_key="...",           # browser: store.state.signing_key
-    user_id=123456,
+    signing_key="...",           # = firebase_id hoac store.state.signing_key
+    user_id=123456,              # JWT sub
     username="your_username",
     device_id="32484704-8a4e-4909-9d42-866773b321d6",  # nên giữ cố định
 )
