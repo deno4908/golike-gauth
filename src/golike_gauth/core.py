@@ -205,6 +205,17 @@ def normalize_path(path: str, base_url: str = BASE_API) -> str:
     return urlparse(base + p).path
 
 
+def _aes_gcm_b64url(signing_key: str, payload: dict) -> str:
+    """AES-GCM encrypt JSON payload -> b64url(iv12 || ct+tag)."""
+    aes_key = derive_aes_key(signing_key)
+    iv = secrets.token_bytes(12)
+    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    ct = AESGCM(aes_key).encrypt(iv, plaintext, None)
+    return b64url_encode(iv + ct)
+
+
 def generate_g_auth(
     *,
     method: str,
@@ -220,8 +231,6 @@ def generate_g_auth(
     Build g-auth token (AES-GCM).
     Payload: {t,x,d,u,n,k,q,r}  Output: b64url(iv12 || ciphertext+tag)
     """
-    aes_key = derive_aes_key(signing_key)
-    iv = secrets.token_bytes(12)
     t = int(ts_ms if ts_ms is not None else time.time() * 1000)
     k = normalize_path(path, base_url)
     q = body_hash("" if body is None else body)
@@ -235,11 +244,94 @@ def generate_g_auth(
         "q": q,
         "r": request_digest(t, device_id, q),
     }
-    plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    ct = AESGCM(aes_key).encrypt(iv, plaintext, None)
-    return b64url_encode(iv + ct)
+    return _aes_gcm_b64url(signing_key, payload)
+
+
+def resolve_tiktok_sig_act(path: str) -> Optional[str]:
+    """
+    uA match table in app:
+      /tiktok/complete-jobs -> complete_job
+      /tiktok/jobs          -> get_job
+    """
+    s = path or ""
+    if "/tiktok/complete-jobs" in s:
+        return "complete_job"
+    if "/tiktok/jobs" in s and "/skip" not in s:
+        return "get_job"
+    return None
+
+
+def split_path_query(path: str) -> tuple:
+    """Return (path_no_query, query_string)."""
+    s = path or ""
+    if "?" in s:
+        p, q = s.split("?", 1)
+        return p, q
+    return s, ""
+
+
+def generate_sig(
+    *,
+    method: str,
+    path: str,
+    signing_key: str,
+    device_id: str,
+    user_id: int,
+    body: JsonBody = None,
+    base_url: str = BASE_API,
+    plt: str = "tiktok",
+    act: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Header `sig` cho TikTok (W_ / cA trong bundle).
+
+    Web hien tai stub W_ => return null (khong gui sig).
+    Van implement theo interface de client/tool gen duoc:
+
+      W_({
+        plt: "tiktok",
+        act: "get_job" | "complete_job",
+        req: { method, path, query, body }
+      })
+
+    path: co the co query (?account_id=...); se tach path/query.
+    body: GET => "" ; POST => JSON compact string.
+    """
+    act = act or resolve_tiktok_sig_act(path)
+    if not act:
+        return None
+
+    path_only, query = split_path_query(path)
+    # body string like kg()/Rf
+    if body is None:
+        body_str = ""
+    elif isinstance(body, str):
+        body_str = body
+    elif isinstance(body, bytes):
+        body_str = body.decode("utf-8")
+    else:
+        body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+
+    # yu(base, path) -> canonical pathname /api/...
+    canon = normalize_path(path_only, base_url)
+    t = int(time.time() * 1000)
+    # Payload gan voi interface W_ + binding user/device/time
+    # (server co the chi doc plt/act/req; them t/d/u de chong replay)
+    payload = {
+        "plt": plt,
+        "act": act,
+        "t": t,
+        "x": generate_nonce_x(),
+        "d": device_id,
+        "u": int(user_id),
+        "req": {
+            "method": method.upper(),
+            "path": canon,
+            "query": query,
+            "body": body_str,
+        },
+    }
+    return _aes_gcm_b64url(signing_key, payload)
 
 
 def decode_g_auth(token: str, signing_key: str) -> dict:
@@ -267,8 +359,13 @@ def build_headers(
     g_client: str = APP_CLIENT,
     user_agent: Optional[str] = None,
     extra: Optional[Mapping[str, str]] = None,
+    with_sig: Optional[bool] = None,
 ) -> dict:
-    """Build request headers with fresh g-auth / g-device-id / t."""
+    """
+    Build request headers with fresh g-auth / g-device-id / t.
+    Auto them header `sig` cho path TikTok (/tiktok/jobs, /tiktok/complete-jobs)
+    neu with_sig is True hoac None (auto).
+    """
     did = generate_device_id(device_id)
     # GET/HEAD/DELETE in app use body "" for signing
     sign_body: JsonBody = "" if body is None else body
@@ -302,6 +399,21 @@ def build_headers(
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
     }
+    # TikTok platform sig (cA/W_)
+    need_sig = with_sig if with_sig is not None else (
+        resolve_tiktok_sig_act(path) is not None
+    )
+    if need_sig:
+        sig = generate_sig(
+            method=method,
+            path=path,
+            body=sign_body,
+            signing_key=signing_key,
+            device_id=did,
+            user_id=int(user_id),
+        )
+        if sig:
+            headers["sig"] = sig
     if extra:
         headers.update(dict(extra))
     return headers
@@ -322,6 +434,7 @@ class GolikeAuth:
         g_client: str = APP_CLIENT,
         base_url: str = BASE_API,
         user_agent: Optional[str] = None,
+        enable_sig: Optional[bool] = None,
     ) -> None:
         self.token = token
         self.signing_key = signing_key
@@ -333,6 +446,8 @@ class GolikeAuth:
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent or MOBILE_UA
         self.profile: dict = {}  # raw /users/me data (neu co)
+        # None = auto (chi TikTok jobs/complete), True = luon gen, False = tat
+        self.enable_sig = enable_sig
 
     # ------------------------------------------------------------------
     # Bootstrap tu token
@@ -346,6 +461,7 @@ class GolikeAuth:
         device_id: Optional[str] = None,
         username: Optional[str] = None,
         verify: bool = True,
+        enable_sig: Optional[bool] = None,
         timeout: float = 30,
     ) -> "GolikeAuth":
         """
@@ -359,6 +475,11 @@ class GolikeAuth:
                - else thu data.firebase_id (app set_signing_key(firebase_id))
                - verify qua POST /security/echo (neu verify=True)
           4. device_id: truyen vao hoac random UUID
+
+        enable_sig:
+          None  = auto (chi path TikTok jobs/complete-jobs)
+          True  = luon gen header sig
+          False = tat sig
 
         Luu y: mot so acc firebase_id != store.signing_key → can truyen
         signing_key thu cong (console: store.state.signing_key).
@@ -394,6 +515,7 @@ class GolikeAuth:
             username=uname,
             device_id=did,
             user_agent=MOBILE_UA,
+            enable_sig=enable_sig,
         )
         auth.profile = me
 
@@ -474,7 +596,10 @@ class GolikeAuth:
         path: str,
         body: JsonBody = None,
         extra: Optional[Mapping[str, str]] = None,
+        with_sig: Optional[bool] = None,
     ) -> dict:
+        # with_sig arg uu tien; else dung self.enable_sig
+        sig_flag = self.enable_sig if with_sig is None else with_sig
         return build_headers(
             token=self.token,
             signing_key=self.signing_key,
@@ -488,6 +613,7 @@ class GolikeAuth:
             g_client=self.g_client,
             user_agent=self.user_agent,
             extra=extra,
+            with_sig=sig_flag,
         )
 
     def decode(self, g_auth_token: str) -> dict:
@@ -514,22 +640,27 @@ class GolikeAuth:
         data: Any = None,
         timeout: float = 30,
         session=None,
+        with_sig: Optional[bool] = None,
     ):
         """
         Signed HTTP request for ANY gateway path.
 
         - GET/HEAD/DELETE without body → sign body as ""
         - POST/PUT/PATCH with json=dict → sign + send compact JSON (no spaces)
+        - TikTok paths auto-add header `sig` (plt/act binding)
         - Do not use requests' json= yourself (it may add spaces and break q hash)
-
-        Examples:
-            auth.request("GET", "/advertising/publishers/instagram/jobs", params={...})
-            auth.request("POST", "/advertising/publishers/instagram/skip-jobs", json={...})
         """
         import requests
+        from urllib.parse import urlencode
 
         method_u = method.upper()
         payload = json if json is not None else json_body
+
+        # Path dung de ky g-auth/sig: gop query vao path string
+        # (g-auth chi lay pathname; sig can ca query)
+        sign_path = path
+        if params and "?" not in path:
+            sign_path = f"{path}?{urlencode(params)}"
 
         if data is not None and payload is not None:
             raise ValueError("pass only one of data= or json=")
@@ -537,13 +668,22 @@ class GolikeAuth:
         if data is not None:
             if isinstance(data, (dict, list)):
                 raw = self._compact_json(data)
-                headers = self.headers(method_u, path, body=raw)
+                headers = self.headers(
+                    method_u, sign_path, body=raw, with_sig=with_sig
+                )
                 send: Any = raw.encode("utf-8")
             elif isinstance(data, str):
-                headers = self.headers(method_u, path, body=data)
+                headers = self.headers(
+                    method_u, sign_path, body=data, with_sig=with_sig
+                )
                 send = data.encode("utf-8")
             elif isinstance(data, bytes):
-                headers = self.headers(method_u, path, body=data.decode("utf-8"))
+                headers = self.headers(
+                    method_u,
+                    sign_path,
+                    body=data.decode("utf-8"),
+                    with_sig=with_sig,
+                )
                 send = data
             else:
                 raise TypeError("data must be dict/list/str/bytes")
@@ -558,7 +698,7 @@ class GolikeAuth:
 
         if payload is not None:
             raw = self._compact_json(payload)
-            headers = self.headers(method_u, path, body=raw)
+            headers = self.headers(method_u, sign_path, body=raw, with_sig=with_sig)
             return (session or requests).request(
                 method_u,
                 self._url(path),
@@ -569,7 +709,7 @@ class GolikeAuth:
             )
 
         # no body
-        headers = self.headers(method_u, path, body="")
+        headers = self.headers(method_u, sign_path, body="", with_sig=with_sig)
         return (session or requests).request(
             method_u,
             self._url(path),
@@ -584,80 +724,8 @@ class GolikeAuth:
     def post(self, path: str, *, json: Any = None, params=None, **kw):
         return self.request("POST", path, json=json, params=params, **kw)
 
-    # ---- Instagram helpers (same contract as web app) ----
+    def put(self, path: str, *, json: Any = None, params=None, **kw):
+        return self.request("PUT", path, json=json, params=params, **kw)
 
-    def get_instagram_job(self, instagram_account_id: str, session=None):
-        """GET /advertising/publishers/instagram/jobs"""
-        return self.get(
-            "/advertising/publishers/instagram/jobs",
-            params={
-                "instagram_account_id": str(instagram_account_id),
-                "data": "null",
-            },
-            session=session,
-        )
-
-    def skip_instagram_job(
-        self,
-        *,
-        ads_id: int,
-        object_id: str,
-        account_id: int,
-        type: str,
-        session=None,
-    ):
-        """
-        POST /advertising/publishers/instagram/skip-jobs
-
-        Body (from JobDetail.skipJobs):
-          {ads_id, object_id, account_id, type}
-        """
-        return self.post(
-            "/advertising/publishers/instagram/skip-jobs",
-            json={
-                "ads_id": ads_id,
-                "object_id": str(object_id),
-                "account_id": account_id,
-                "type": type,
-            },
-            session=session,
-        )
-
-    def complete_instagram_job(
-        self,
-        *,
-        instagram_users_advertising_id: int,
-        instagram_account_id: int,
-        async_: bool = True,
-        data: Any = None,
-        comment_id: Optional[int] = None,
-        message: Optional[str] = None,
-        captcha: Optional[str] = None,
-        captcha_data: Any = None,
-        session=None,
-    ):
-        """
-        POST /advertising/publishers/instagram/complete-jobs
-
-        Body (from JobDetail.completeJob):
-          {instagram_users_advertising_id, instagram_account_id, async, data, ...}
-        """
-        body: dict = {
-            "instagram_users_advertising_id": instagram_users_advertising_id,
-            "instagram_account_id": instagram_account_id,
-            "async": async_,
-            "data": data,
-        }
-        if comment_id is not None:
-            body["comment_id"] = comment_id
-        if message is not None:
-            body["message"] = message
-        if captcha is not None:
-            body["captcha"] = captcha
-        if captcha_data is not None:
-            body["captcha_data"] = captcha_data
-        return self.post(
-            "/advertising/publishers/instagram/complete-jobs",
-            json=body,
-            session=session,
-        )
+    def delete(self, path: str, *, params=None, **kw):
+        return self.request("DELETE", path, params=params, **kw)

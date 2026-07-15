@@ -4,9 +4,63 @@
 [![Python](https://img.shields.io/pypi/pyversions/golike-gauth.svg)](https://pypi.org/project/golike-gauth/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Generate valid **`g-auth`** / **`g-device-id`** headers for the Golike gateway API.
+Generate valid **`g-auth`** / **`g-device-id`** (và **`sig`** TikTok) headers cho Golike gateway API.
 
-**Repo:** https://github.com/deno4908/golike-gauth
+**Repo:** https://github.com/deno4908/golike-gauth  
+**Version hiện tại (source):** `0.1.5` — PyPI có thể còn `0.1.3` nếu chưa upload.
+
+## Changelog
+
+### 0.1.5 (mới — chưa / sắp lên PyPI)
+
+- **Gỡ helper theo platform** (`get_instagram_job`, `get_tiktok_job`, `complete_*`, `skip_*`…).
+- **Auth dùng chung:** chỉ còn `from_token` + `get` / `post` / `put` / `delete` / `request` / `headers`.
+- Gọi API mọi platform theo path, ví dụ:
+  ```python
+  auth.get("/advertising/publishers/tiktok/jobs", params={"account_id": "1", "data": "null"})
+  auth.post("/advertising/publishers/instagram/skip-jobs", json={...})
+  ```
+- CLI gọn: bootstrap bằng token, tuỳ chọn `--enable-sig` / `--no-sig`.
+
+### 0.1.4
+
+- Thêm **`enable_sig`** trên `GolikeAuth` / `from_token`:
+  - `None` = auto (chỉ path TikTok jobs/complete)
+  - `True` = bật `sig`
+  - `False` = tắt `sig`
+- Có thể ghi đè từng request: `auth.get(path, with_sig=True)`.
+
+### 0.1.3
+
+- Header **`sig`** cho TikTok (`generate_sig`, auto gắn khi path khớp).
+- `build_headers` / `request` gộp query vào path khi ký `sig`.
+- Helper TikTok (đã **gỡ ở 0.1.5** — dùng `get`/`post` chung).
+
+### 0.1.2
+
+- **`GolikeAuth.from_token(token)`** — chỉ cần JWT:
+  - `user_id` từ JWT `sub`
+  - `username` / profile từ `GET /users/me` (User-Agent **mobile**)
+  - `signing_key` mặc định = `data.firebase_id`
+  - `device_id` tự sinh UUID
+- Hằng `MOBILE_UA`, `fetch_user_me`, `jwt_user_id`.
+- `verify=True/False` khi bootstrap (echo check).
+
+### 0.1.1 / 0.1.0
+
+- Core: HKDF + AES-GCM `g-auth`, `g-device-id`, header `t`.
+- `GolikeAuth` request ký body compact (không space).
+- Fix `g-version` / `g-client` đúng app web.
+
+### Nâng cấp từ 0.1.3
+
+```bash
+pip install -U golike-gauth
+# hoặc local:
+pip install -e ".[requests]"
+```
+
+**Breaking (0.1.5):** nếu code cũ gọi `auth.get_tiktok_job(...)` / `get_instagram_job(...)` → đổi sang `auth.get(...)` / `auth.post(...)` như trên.
 
 ## Install
 
@@ -16,8 +70,8 @@ pip install golike-gauth
 # optional: HTTP helper (requests)
 pip install "golike-gauth[requests]"
 
-# install from GitHub
-pip install git+https://github.com/deno4908/golike-gauth.git
+# ban moi nhat tu GitHub (neu PyPI chua cap nhat)
+pip install -U git+https://github.com/deno4908/golike-gauth.git
 ```
 
 ## Quick start

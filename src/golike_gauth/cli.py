@@ -4,52 +4,56 @@ import argparse
 import json
 import sys
 
-from .core import (
-    GolikeAuth,
-    build_headers,
-    decode_g_auth,
-    generate_device_id,
-    normalize_path,
-)
+from .core import GolikeAuth, decode_g_auth, normalize_path
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="golike-gauth", description="Golike g-auth helper")
-    p.add_argument("--token", required=True)
-    p.add_argument("--signing-key", required=True)
-    p.add_argument("--user-id", type=int, required=True)
-    p.add_argument("--username", required=True)
-    p.add_argument("--device-id", default=None)
-    p.add_argument("--path", default="/advertising/publishers/instagram/jobs")
+    p = argparse.ArgumentParser(prog="golike-gauth", description="Golike auth helper")
+    p.add_argument("--token", required=True, help="JWT (hoac dung from_token trong code)")
+    p.add_argument("--signing-key", default=None)
+    p.add_argument("--path", default="/users/me")
     p.add_argument("--method", default="GET")
-    p.add_argument("--decode", default=None, help="decode existing g-auth")
-    p.add_argument("--ig-account-id", default=None)
-    p.add_argument("--call", action="store_true", help="call instagram jobs API")
+    p.add_argument("--enable-sig", action="store_true", help="bat header sig")
+    p.add_argument("--no-sig", action="store_true", help="tat header sig")
+    p.add_argument("--decode", default=None, help="decode g-auth token")
+    p.add_argument("--call", action="store_true", help="goi API path")
     args = p.parse_args(argv)
 
     if args.decode:
+        if not args.signing_key:
+            print("--signing-key required with --decode", file=sys.stderr)
+            return 2
         print(json.dumps(decode_g_auth(args.decode, args.signing_key), indent=2))
         return 0
 
-    auth = GolikeAuth(
-        token=args.token,
-        signing_key=args.signing_key,
-        user_id=args.user_id,
-        username=args.username,
-        device_id=args.device_id,
-    )
+    enable_sig = True if args.enable_sig else (False if args.no_sig else None)
+    try:
+        if args.signing_key:
+            # manual bootstrap nhe: from_token van goi /me neu muon day du
+            auth = GolikeAuth.from_token(
+                args.token,
+                signing_key=args.signing_key,
+                enable_sig=enable_sig,
+                verify=False,
+            )
+        else:
+            auth = GolikeAuth.from_token(
+                args.token, enable_sig=enable_sig, verify=False
+            )
+    except Exception as e:
+        print("auth fail:", e, file=sys.stderr)
+        return 1
+
     headers = auth.headers(args.method, args.path, body="")
-    print("g-device-id:", headers["g-device-id"])
-    print("g-auth:", headers["g-auth"])
-    print("t:", headers["t"])
+    print("user:", auth.username, auth.user_id)
+    print("device:", auth.device_id)
+    print("g-auth:", headers["g-auth"][:48] + "...")
+    if "sig" in headers:
+        print("sig:", headers["sig"][:48] + "...")
     print("path:", normalize_path(args.path))
-    print("decoded:", json.dumps(auth.decode(headers["g-auth"]), ensure_ascii=False))
 
     if args.call:
-        if not args.ig_account_id:
-            print("--ig-account-id required with --call", file=sys.stderr)
-            return 2
-        resp = auth.get_instagram_job(args.ig_account_id)
+        resp = auth.request(args.method, args.path)
         print("status:", resp.status_code)
         try:
             print(resp.json())
