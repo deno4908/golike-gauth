@@ -11,6 +11,33 @@ Client auth for the **Golike gateway API** (2026): JWT + device headers, TikTok 
 
 ## Changelog
 
+### 0.1.8+ — `enable_sig` default `False`
+
+`sig` chỉ dùng cho TikTok jobs/complete. Mặc định **tắt** để không ảnh hưởng API job nền tảng khác (Facebook, Instagram, …).
+
+```python
+# Default — no sig on any request
+auth = GolikeAuth.from_token("eyJ...")
+
+# Facebook / multi jobs — no sig
+auth.get("/advertising/publishers/get-jobs-2026", params={...})
+
+# TikTok — must enable explicitly
+auth = GolikeAuth.from_token("eyJ...", enable_sig=True)
+auth.get(
+    "/advertising/publishers/tiktok/jobs",
+    params={"account_id": "711964", "data": "null"},
+)
+
+# Or per-request override
+auth.get(".../tiktok/jobs", params={...}, with_sig=True)
+```
+
+| `enable_sig` | Behavior |
+|---|---|
+| `False` (default) | Never mint/send `sig` |
+| `True` | Mint `sig` only for paths matching `/tiktok/jobs` or `/tiktok/complete-jobs` |
+
 ### 0.1.8 — TikTok `sig` encryption overhaul (JS bundle 24/7)
 
 App no longer puts a locally encrypted blob directly into `sig`.  
@@ -94,7 +121,7 @@ Mint body (`req.path` is gateway pathname, including `/api/...`):
 ```python
 from golike_gauth import GolikeAuth
 
-auth = GolikeAuth.from_token("eyJ...")  # JWT only
+auth = GolikeAuth.from_token("eyJ...", enable_sig=True)  # TikTok needs sig
 # 1) GET gateway /users/me
 # 2) POST security/session → signing_key
 # 3) on TikTok get/post: mint security/token → header sig

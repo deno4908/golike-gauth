@@ -689,9 +689,8 @@ def build_headers(
             headers["g-client"] = g_client
 
     # TikTok: mint sig qua POST api.golike.net/api/v1/security/token
-    need_sig = with_sig if with_sig is not None else (
-        resolve_tiktok_sig_act(path) is not None
-    )
+    # with_sig None = off at build_headers level (caller decides)
+    need_sig = bool(with_sig) if with_sig is not None else False
     if need_sig:
         if not sk:
             raise ValueError(
@@ -732,7 +731,7 @@ class GolikeAuth:
         g_client: str = APP_CLIENT,
         base_url: str = BASE_API,
         user_agent: Optional[str] = None,
-        enable_sig: Optional[bool] = None,
+        enable_sig: bool = False,
         enable_gauth: Optional[bool] = None,
     ) -> None:
         self.token = token
@@ -748,10 +747,8 @@ class GolikeAuth:
         self.security_session: dict = {}
         self.signing_key_exp: Optional[int] = None
         self.scheme_version: Optional[str] = None
-        # None = auto bat sig cho path TikTok jobs/complete khi co signing_key
-        # True = luon co gang gan sig | False = tat
-        self.enable_sig = True if enable_sig is None else enable_sig
-        # False = API moi (khong header g-auth). True = legacy AES g-auth
+        # Default False — does not touch non-TikTok job APIs
+        self.enable_sig = bool(enable_sig)
         self.enable_gauth = enable_gauth if enable_gauth is not None else False
 
     # ------------------------------------------------------------------
@@ -766,20 +763,20 @@ class GolikeAuth:
         device_id: Optional[str] = None,
         username: Optional[str] = None,
         verify: bool = False,
-        enable_sig: Optional[bool] = None,
+        enable_sig: bool = False,
         enable_gauth: Optional[bool] = None,
         fetch_session: bool = True,
         timeout: float = 30,
     ) -> "GolikeAuth":
         """
-        Chi can JWT token.
+        Bootstrap from JWT only.
 
-        Golike moi (2026):
-          1. GET gateway /users/me → profile
-          2. POST api.golike.net/api/v1/security/session → signing_key
-          3. TikTok jobs: header ``sig`` (AES token, khong con g-auth)
+        1. GET gateway /users/me
+        2. POST api.golike.net/api/v1/security/session → signing_key
+           when fetch_session=True
+        3. TikTok jobs need enable_sig=True to mint header sig
 
-        fetch_session=False: bo buoc (2) — phai tu truyen signing_key.
+        enable_sig defaults to False so other job APIs are unaffected.
         """
         token = (token or "").strip()
         if token.lower().startswith("bearer "):
@@ -945,27 +942,17 @@ class GolikeAuth:
         gauth_flag = self.enable_gauth if with_gauth is None else with_gauth
         if with_sig is not None:
             sig_flag = with_sig
-        elif self.enable_sig is False:
-            sig_flag = False
-        elif self.enable_sig is True:
-            # True: chi auto cho path TikTok; path khac khong ep sig
-            sig_flag = (
-                True
-                if resolve_tiktok_sig_act(path) is not None
-                else False
-            )
+        elif self.enable_sig:
+            # Only TikTok jobs/complete — never other platforms
+            sig_flag = resolve_tiktok_sig_act(path) is not None
         else:
-            sig_flag = None  # auto trong build_headers
+            sig_flag = False
 
-        # Auto refresh signing_key truoc khi ky sig
-        need_sig = sig_flag if sig_flag is not None else (
-            resolve_tiktok_sig_act(path) is not None
-        )
+        need_sig = bool(sig_flag)
         if need_sig:
             try:
                 self.refresh_signing_key(force=False)
             except Exception:
-                # neu chua co key / session reject — de build_headers raise ro
                 pass
 
         return build_headers(
