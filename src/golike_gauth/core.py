@@ -13,12 +13,20 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-# Constants from app JS (B_="glk-gauth", E_="v3-2026", S_="q3")
+# --- Crypto schemes (JS_24_7 index bundle) ---
+# Gateway g-auth (hA / tm):
 SALT = "glk-gauth-v3-2026q3"
 HKDF_INFO = "aes-gcm-key"
-APP_VERSION = "26.07.10.2"
+# Sectoken mint g-auth (xA / dA) → server tra header sig:
+SECTOKEN_SALT = "glk-sectoken-v31-2026q3"
+SECTOKEN_HKDF_INFO = "aes-gcm-key-v31"
+
+APP_VERSION = "26.07.24.1"
 APP_CLIENT = "109096667105508"
 BASE_API = "https://gateway.golike.net/api"
+SECURITY_API = "https://api.golike.net"
+SECURITY_SESSION_PATH = "/api/v1/security/session"
+SECURITY_TOKEN_PATH = "/api/v1/security/token"
 # Mobile UA — app web gen g-version/g-client/header theo client mobile
 MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 "
@@ -32,7 +40,7 @@ def jwt_payload(token: str) -> dict:
     """Decode JWT payload (no verify)."""
     parts = (token or "").strip().split(".")
     if len(parts) != 3:
-        raise ValueError("token phai la JWT 3 phan (header.payload.sig)")
+        raise ValueError("token must be a JWT with three segments")
     raw = b64url_decode(parts[1])
     return json.loads(raw.decode("utf-8"))
 
@@ -42,7 +50,7 @@ def jwt_user_id(token: str) -> int:
     payload = jwt_payload(token)
     sub = payload.get("sub")
     if sub is None:
-        raise ValueError("JWT thieu sub (user_id)")
+        raise ValueError("JWT payload is missing required claim: sub")
     return int(sub)
 
 
@@ -83,15 +91,97 @@ def fetch_user_me(token: str, *, device_id: Optional[str] = None, timeout: float
     try:
         body = resp.json()
     except Exception:
-        raise ValueError(f"/users/me HTTP {resp.status_code}: {resp.text[:200]}")
-    if resp.status_code != 200 or not (body.get("success") or body.get("status") == 200):
         raise ValueError(
-            f"/users/me fail: {body.get('message') or body} (HTTP {resp.status_code})"
+            f"GET /users/me returned non-JSON response: HTTP {resp.status_code}"
         )
+    if resp.status_code != 200 or not (body.get("success") or body.get("status") == 200):
+        detail = body.get("message") or body.get("error") or body
+        raise ValueError(f"GET /users/me failed: HTTP {resp.status_code}: {detail}")
     data = body.get("data") or {}
     if not isinstance(data, dict):
-        raise ValueError("/users/me data khong hop le")
+        raise ValueError("GET /users/me returned an invalid data payload")
     return data
+
+
+def security_session_headers(token: str) -> dict:
+    """Header goi api.golike.net security (giong curl app — khong can g-device-id)."""
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "vi,en-US;q=0.9,en;q=0.8",
+        "Authorization": f"Bearer {token}",
+        "Cache-Control": "no-cache",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Origin": "https://app.golike.net",
+        "Pragma": "no-cache",
+        "Referer": "https://app.golike.net/",
+        "User-Agent": MOBILE_UA,
+        "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+        "sec-ch-ua-mobile": "?1",
+        "sec-ch-ua-platform": '"Android"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+
+def fetch_security_session(
+    token: str,
+    *,
+    timeout: float = 30,
+    session=None,
+) -> dict:
+    """
+    POST https://api.golike.net/api/v1/security/session
+
+    App goi API nay TRUOC khi get job TikTok. Response:
+      {
+        "signing_key": "<b64 32B>",
+        "exp": 1784887743,
+        "epoch": "0",
+        "schemeVersion": "v3.2"
+      }
+
+    Raise ValueError neu rejected / thieu key.
+    """
+    import requests
+
+    token = (token or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    http = session or requests
+    url = f"{SECURITY_API}{SECURITY_SESSION_PATH}"
+    resp = http.post(
+        url,
+        headers=security_session_headers(token),
+        json={},
+        timeout=timeout,
+    )
+    try:
+        body = resp.json()
+    except Exception:
+        raise ValueError(
+            f"POST /security/session returned non-JSON response: HTTP {resp.status_code}"
+        )
+    if not isinstance(body, dict):
+        raise ValueError(
+            f"POST /security/session returned an invalid payload: {type(body).__name__}"
+        )
+
+    sk = body.get("signing_key")
+    if not sk or not isinstance(sk, str) or not sk.strip():
+        reason = body.get("reason") or body.get("message") or "unknown"
+        raise ValueError(
+            f"POST /security/session did not return a signing_key: {reason}"
+        )
+    sk = sk.strip()
+    parse_signing_key(sk)  # validate 32 bytes
+    return {
+        "signing_key": sk,
+        "exp": body.get("exp"),
+        "epoch": body.get("epoch"),
+        "schemeVersion": body.get("schemeVersion") or body.get("scheme_version"),
+        "raw": body,
+    }
 
 
 def resolve_signing_key(
@@ -163,7 +253,7 @@ def b64url_decode(data: str) -> bytes:
 def parse_signing_key(signing_key: str) -> bytes:
     """Decode 32-byte signing key from hex or base64/base64url."""
     if not signing_key or not isinstance(signing_key, str):
-        raise ValueError("signing_key empty or not a string")
+        raise ValueError("signing_key must be a non-empty string")
 
     attempts = []
     s = signing_key.strip()
@@ -190,19 +280,31 @@ def parse_signing_key(signing_key: str) -> bytes:
             attempts.append((label, str(ex)))
 
     raise ValueError(
-        f"signing key must decode to 32 bytes (AES-256); attempts={attempts}"
+        f"signing_key must decode to exactly 32 bytes for AES-256; attempts={attempts}"
     )
 
 
-def derive_aes_key(signing_key: str) -> bytes:
-    """HKDF-SHA256(signing_key, salt=SALT, info=aes-gcm-key) -> 32 bytes."""
+def derive_aes_key(
+    signing_key: str,
+    *,
+    salt: str = SALT,
+    info: str = HKDF_INFO,
+) -> bytes:
+    """HKDF-SHA256(signing_key, salt, info) -> 32 bytes."""
     ikm = parse_signing_key(signing_key)
     return HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=SALT.encode("utf-8"),
-        info=HKDF_INFO.encode("utf-8"),
+        salt=salt.encode("utf-8"),
+        info=info.encode("utf-8"),
     ).derive(ikm)
+
+
+def derive_sectoken_aes_key(signing_key: str) -> bytes:
+    """Key cho mint sig (xA): salt glk-sectoken-v31-2026q3."""
+    return derive_aes_key(
+        signing_key, salt=SECTOKEN_SALT, info=SECTOKEN_HKDF_INFO
+    )
 
 
 def sha256_hex(text: str) -> str:
@@ -223,7 +325,20 @@ def body_hash(body: JsonBody = None) -> str:
 
 
 def request_digest(ts_ms: int, device_id: str, q: str) -> str:
+    """r field for gateway g-auth (uA)."""
     return sha256_hex(f"{ts_ms}:{device_id}:{q}:{SALT}")[:16]
+
+
+def sectoken_digest_r(ts_ms: int, user_id: int, q: str) -> str:
+    """r field for sectoken g-auth (cA): sha256(sh:t:userId:q)[:16]."""
+    return sha256_hex(f"{SECTOKEN_SALT}:{ts_ms}:{int(user_id)}:{q}")[:16]
+
+
+def sectoken_digest_r2(device_id: str, method: str, path: str) -> str:
+    """r2 field (fA): sha256hex(device|method|path|sh)[16:40]."""
+    return sha256_hex(
+        f"{device_id}|{method.upper()}|{path}|{SECTOKEN_SALT}"
+    )[16:40]
 
 
 def generate_device_id(existing: Optional[str] = None) -> str:
@@ -262,9 +377,8 @@ def normalize_path(path: str, base_url: str = BASE_API) -> str:
     return urlparse(base + p).path
 
 
-def _aes_gcm_b64url(signing_key: str, payload: dict) -> str:
+def _aes_gcm_b64url(aes_key: bytes, payload: dict) -> str:
     """AES-GCM encrypt JSON payload -> b64url(iv12 || ct+tag)."""
-    aes_key = derive_aes_key(signing_key)
     iv = secrets.token_bytes(12)
     plaintext = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
@@ -285,8 +399,8 @@ def generate_g_auth(
     ts_ms: Optional[int] = None,
 ) -> str:
     """
-    Build g-auth token (AES-GCM).
-    Payload: {t,x,d,u,n,k,q,r}  Output: b64url(iv12 || ciphertext+tag)
+    Gateway g-auth (hA) — salt glk-gauth-v3-2026q3.
+    Payload: {t,x,d,u,n,k,q,r}
     """
     t = int(ts_ms if ts_ms is not None else time.time() * 1000)
     k = normalize_path(path, base_url)
@@ -301,7 +415,41 @@ def generate_g_auth(
         "q": q,
         "r": request_digest(t, device_id, q),
     }
-    return _aes_gcm_b64url(signing_key, payload)
+    return _aes_gcm_b64url(derive_aes_key(signing_key), payload)
+
+
+def generate_sectoken_g_auth(
+    *,
+    method: str,
+    path: str,
+    signing_key: str,
+    device_id: str,
+    user_id: int,
+    body: JsonBody = None,
+    ts_ms: Optional[int] = None,
+) -> str:
+    """
+    Sectoken g-auth (xA) de POST /api/v1/security/token.
+    salt glk-sectoken-v31-2026q3 + field r2.
+    path: dung raw path API security, vd /api/v1/security/token
+    """
+    t = int(ts_ms if ts_ms is not None else time.time() * 1000)
+    method_u = method.upper()
+    # JS: k = path as passed (dx = "/api/v1/security/token")
+    k = path if path.startswith("/") else "/" + path
+    q = body_hash("" if body is None else body)
+    payload = {
+        "t": t,
+        "x": generate_nonce_x(),
+        "d": device_id,
+        "u": int(user_id),
+        "n": method_u,
+        "k": k,
+        "q": q,
+        "r": sectoken_digest_r(t, int(user_id), q),
+        "r2": sectoken_digest_r2(device_id, method_u, k),
+    }
+    return _aes_gcm_b64url(derive_sectoken_aes_key(signing_key), payload)
 
 
 def resolve_tiktok_sig_act(path: str) -> Optional[str]:
@@ -334,32 +482,59 @@ def generate_sig(
     signing_key: str,
     device_id: str,
     user_id: int,
+    token: str,
     body: JsonBody = None,
     base_url: str = BASE_API,
     plt: str = "tiktok",
     act: Optional[str] = None,
+    timeout: float = 30,
 ) -> Optional[str]:
     """
-    Header `sig` cho TikTok (W_ / cA trong bundle).
+    Mint header ``sig`` cho TikTok (JS_24_7: _A / xx).
 
-    Web hien tai stub W_ => return null (khong gui sig).
-    Van implement theo interface de client/tool gen duoc:
-
-      W_({
-        plt: "tiktok",
-        act: "get_job" | "complete_job",
-        req: { method, path, query, body }
-      })
-
-    path: co the co query (?account_id=...); se tach path/query.
-    body: GET => "" ; POST => JSON compact string.
+    Flow:
+      1. body = {plt, act, req:{method,path,query,body}}
+      2. g-auth = generate_sectoken_g_auth(POST, /api/v1/security/token, body)
+      3. POST https://api.golike.net/api/v1/security/token
+      4. return response.data.token  (hoac response.token)
     """
+    return mint_security_token(
+        method=method,
+        path=path,
+        signing_key=signing_key,
+        device_id=device_id,
+        user_id=user_id,
+        token=token,
+        body=body,
+        base_url=base_url,
+        plt=plt,
+        act=act,
+        timeout=timeout,
+    )
+
+
+def mint_security_token(
+    *,
+    method: str,
+    path: str,
+    signing_key: str,
+    device_id: str,
+    user_id: int,
+    token: str,
+    body: JsonBody = None,
+    base_url: str = BASE_API,
+    plt: str = "tiktok",
+    act: Optional[str] = None,
+    timeout: float = 30,
+) -> Optional[str]:
+    """POST /api/v1/security/token → token dung lam header sig."""
+    import requests
+
     act = act or resolve_tiktok_sig_act(path)
     if not act:
         return None
 
     path_only, query = split_path_query(path)
-    # body string like kg()/Rf
     if body is None:
         body_str = ""
     elif isinstance(body, str):
@@ -369,18 +544,10 @@ def generate_sig(
     else:
         body_str = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
-    # yu(base, path) -> canonical pathname /api/...
     canon = normalize_path(path_only, base_url)
-    t = int(time.time() * 1000)
-    # Payload gan voi interface W_ + binding user/device/time
-    # (server co the chi doc plt/act/req; them t/d/u de chong replay)
-    payload = {
+    mint_body_obj = {
         "plt": plt,
         "act": act,
-        "t": t,
-        "x": generate_nonce_x(),
-        "d": device_id,
-        "u": int(user_id),
         "req": {
             "method": method.upper(),
             "path": canon,
@@ -388,7 +555,51 @@ def generate_sig(
             "body": body_str,
         },
     }
-    return _aes_gcm_b64url(signing_key, payload)
+    mint_body = json.dumps(mint_body_obj, ensure_ascii=False, separators=(",", ":"))
+    g_auth = generate_sectoken_g_auth(
+        method="POST",
+        path=SECURITY_TOKEN_PATH,
+        body=mint_body,
+        signing_key=signing_key,
+        device_id=device_id,
+        user_id=int(user_id),
+    )
+    jwt = (token or "").strip()
+    if jwt.lower().startswith("bearer "):
+        jwt = jwt[7:].strip()
+    headers = {
+        "Content-Type": "application/json;charset=utf-8",
+        "Authorization": f"Bearer {jwt}",
+        "g-auth": g_auth,
+        "g-device-id": device_id,
+        "Origin": "https://app.golike.net",
+        "Referer": "https://app.golike.net/",
+        "User-Agent": MOBILE_UA,
+        "Accept": "application/json, text/plain, */*",
+    }
+    url = f"{SECURITY_API}{SECURITY_TOKEN_PATH}"
+    resp = requests.post(
+        url, headers=headers, data=mint_body.encode("utf-8"), timeout=timeout
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        raise ValueError(
+            f"POST /security/token returned non-JSON response: HTTP {resp.status_code}"
+        )
+    if resp.status_code >= 400:
+        raise ValueError(
+            f"POST /security/token failed: HTTP {resp.status_code}: {data!r}"
+        )
+    if isinstance(data, dict):
+        if isinstance(data.get("token"), str) and data["token"]:
+            return data["token"]
+        inner = data.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("token"), str):
+            return inner["token"]
+        if isinstance(inner, str) and inner:
+            return inner
+    raise ValueError("POST /security/token response is missing a token field")
 
 
 def decode_g_auth(token: str, signing_key: str) -> dict:
@@ -396,7 +607,7 @@ def decode_g_auth(token: str, signing_key: str) -> dict:
     aes_key = derive_aes_key(signing_key)
     raw = b64url_decode(token)
     if len(raw) < 12 + 16:
-        raise ValueError("token too short")
+        raise ValueError("g-auth token is too short to decrypt")
     iv, ct = raw[:12], raw[12:]
     pt = AESGCM(aes_key).decrypt(iv, ct, None)
     return json.loads(pt.decode("utf-8"))
@@ -453,8 +664,7 @@ def build_headers(
         headers["g-username"] = username
 
     sk = (signing_key or "").strip() or None
-    # Mac dinh: KHONG gui g-auth (API moi). Chi bat khi with_gauth=True
-    # hoac with_gauth=None + legacy_client_headers + co signing_key.
+    # Mac dinh: KHONG gui g-auth (API moi). Chi bat khi with_gauth=True.
     use_gauth = False
     if with_gauth is True:
         use_gauth = True
@@ -465,7 +675,7 @@ def build_headers(
 
     if use_gauth:
         if not sk:
-            raise ValueError("with_gauth=True can signing_key/firebase_id")
+            raise ValueError("with_gauth=True requires a valid signing_key")
         headers["g-auth"] = generate_g_auth(
             method=method,
             path=path,
@@ -477,20 +687,31 @@ def build_headers(
         if legacy_client_headers:
             headers["g-version"] = g_version
             headers["g-client"] = g_client
-        need_sig = with_sig if with_sig is not None else (
-            resolve_tiktok_sig_act(path) is not None
-        )
-        if need_sig:
-            sig = generate_sig(
-                method=method,
-                path=path,
-                body=sign_body,
-                signing_key=sk,
-                device_id=did,
-                user_id=int(user_id or 0),
+
+    # TikTok: mint sig qua POST api.golike.net/api/v1/security/token
+    need_sig = with_sig if with_sig is not None else (
+        resolve_tiktok_sig_act(path) is not None
+    )
+    if need_sig:
+        if not sk:
+            raise ValueError(
+                "TikTok requests require a signing_key to mint the sig header; "
+                "call GolikeAuth.from_token with fetch_session=True or pass signing_key"
             )
-            if sig:
-                headers["sig"] = sig
+        sig = mint_security_token(
+            method=method,
+            path=path,
+            body=sign_body,
+            signing_key=sk,
+            device_id=did,
+            user_id=int(user_id or 0),
+            token=token,
+        )
+        if not sig:
+            raise ValueError(
+                "failed to mint sig: path is not a recognized TikTok jobs endpoint"
+            )
+        headers["sig"] = sig
     if extra:
         headers.update(dict(extra))
     return headers
@@ -524,9 +745,13 @@ class GolikeAuth:
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent or MOBILE_UA
         self.profile: dict = {}
-        # None = auto path TikTok (chi khi enable_gauth), True/False force
-        self.enable_sig = enable_sig
-        # None/False = API moi (khong g-auth). True = legacy AES g-auth
+        self.security_session: dict = {}
+        self.signing_key_exp: Optional[int] = None
+        self.scheme_version: Optional[str] = None
+        # None = auto bat sig cho path TikTok jobs/complete khi co signing_key
+        # True = luon co gang gan sig | False = tat
+        self.enable_sig = True if enable_sig is None else enable_sig
+        # False = API moi (khong header g-auth). True = legacy AES g-auth
         self.enable_gauth = enable_gauth if enable_gauth is not None else False
 
     # ------------------------------------------------------------------
@@ -543,19 +768,18 @@ class GolikeAuth:
         verify: bool = False,
         enable_sig: Optional[bool] = None,
         enable_gauth: Optional[bool] = None,
+        fetch_session: bool = True,
         timeout: float = 30,
     ) -> "GolikeAuth":
         """
         Chi can JWT token.
 
         Golike moi (2026):
-          - GET /users/me **khong** tra firebase_id
-          - Request **khong** can g-auth / sig
-          - Chi Bearer + g-device-id + g-username + t
+          1. GET gateway /users/me → profile
+          2. POST api.golike.net/api/v1/security/session → signing_key
+          3. TikTok jobs: header ``sig`` (AES token, khong con g-auth)
 
-        Legacy (opt-in):
-          - enable_gauth=True + signing_key/firebase_id
-          - verify=True goi /security/echo
+        fetch_session=False: bo buoc (2) — phai tu truyen signing_key.
         """
         token = (token or "").strip()
         if token.lower().startswith("bearer "):
@@ -566,13 +790,17 @@ class GolikeAuth:
         me = fetch_user_me(token, device_id=did, timeout=timeout)
         uname = (username or me.get("username") or me.get("name") or "user").strip()
 
-        # Optional legacy key — khong bat buoc
         sk = resolve_signing_key(me, signing_key=signing_key)
+        session_meta: dict = {}
+        if not sk and fetch_session:
+            session_meta = fetch_security_session(token, timeout=timeout)
+            sk = session_meta.get("signing_key")
+
         use_gauth = bool(enable_gauth) if enable_gauth is not None else False
         if use_gauth and not sk:
             raise ValueError(
-                "enable_gauth=True nhung khong co firebase_id/signing_key. "
-                "API moi khong can g-auth — bo enable_gauth hoac truyen signing_key."
+                "enable_gauth=True requires a signing_key from security/session "
+                "or an explicit signing_key argument"
             )
 
         auth = cls(
@@ -586,15 +814,43 @@ class GolikeAuth:
             enable_gauth=use_gauth,
         )
         auth.profile = dict(me)
+        if session_meta:
+            auth._apply_security_session(session_meta)
 
         if verify and use_gauth and sk:
             ok, detail = auth.verify_signing_key(timeout=timeout)
             if not ok:
                 raise ValueError(
-                    "signing_key server decrypt_fail. "
-                    f"detail={detail}"
+                    f"signing_key verification failed via /security/echo: {detail}"
                 )
         return auth
+
+    def _apply_security_session(self, meta: Mapping[str, Any]) -> None:
+        self.security_session = dict(meta.get("raw") or meta)
+        sk = meta.get("signing_key")
+        if sk:
+            self.signing_key = str(sk).strip()
+        exp = meta.get("exp")
+        try:
+            self.signing_key_exp = int(exp) if exp is not None else None
+        except (TypeError, ValueError):
+            self.signing_key_exp = None
+        ver = meta.get("schemeVersion") or meta.get("scheme_version")
+        self.scheme_version = str(ver) if ver else None
+
+    def refresh_signing_key(self, *, timeout: float = 30, force: bool = False) -> str:
+        """
+        Goi lai POST /security/session khi key het han (exp) hoac force=True.
+        """
+        if not force and self.signing_key and self.signing_key_exp:
+            # refresh som 60s
+            if int(time.time()) < int(self.signing_key_exp) - 60:
+                return self.signing_key
+        meta = fetch_security_session(self.token, timeout=timeout)
+        self._apply_security_session(meta)
+        if not self.signing_key:
+            raise ValueError("refresh_signing_key returned an empty signing_key")
+        return self.signing_key
 
     @property
     def firebase_id(self) -> Optional[str]:
@@ -663,8 +919,8 @@ class GolikeAuth:
     ) -> str:
         if not self.signing_key:
             raise ValueError(
-                "API moi khong dung g-auth (khong co signing_key/firebase_id). "
-                "Chi can auth.headers() / auth.get() / auth.post()."
+                "g_auth is unavailable without a signing_key; "
+                "use headers, get, or post for the current API"
             )
         return generate_g_auth(
             method=method,
@@ -686,8 +942,32 @@ class GolikeAuth:
         with_sig: Optional[bool] = None,
         with_gauth: Optional[bool] = None,
     ) -> dict:
-        sig_flag = self.enable_sig if with_sig is None else with_sig
         gauth_flag = self.enable_gauth if with_gauth is None else with_gauth
+        if with_sig is not None:
+            sig_flag = with_sig
+        elif self.enable_sig is False:
+            sig_flag = False
+        elif self.enable_sig is True:
+            # True: chi auto cho path TikTok; path khac khong ep sig
+            sig_flag = (
+                True
+                if resolve_tiktok_sig_act(path) is not None
+                else False
+            )
+        else:
+            sig_flag = None  # auto trong build_headers
+
+        # Auto refresh signing_key truoc khi ky sig
+        need_sig = sig_flag if sig_flag is not None else (
+            resolve_tiktok_sig_act(path) is not None
+        )
+        if need_sig:
+            try:
+                self.refresh_signing_key(force=False)
+            except Exception:
+                # neu chua co key / session reject — de build_headers raise ro
+                pass
+
         return build_headers(
             token=self.token,
             signing_key=self.signing_key,
@@ -708,7 +988,7 @@ class GolikeAuth:
 
     def decode(self, g_auth_token: str) -> dict:
         if not self.signing_key:
-            raise ValueError("khong co signing_key de decode g-auth")
+            raise ValueError("signing_key is required to decode a g-auth token")
         return decode_g_auth(g_auth_token, self.signing_key)
 
     def _url(self, path: str) -> str:
@@ -755,7 +1035,7 @@ class GolikeAuth:
             sign_path = f"{path}?{urlencode(params)}"
 
         if data is not None and payload is not None:
-            raise ValueError("pass only one of data= or json=")
+            raise ValueError("pass only one of data or json")
 
         if data is not None:
             if isinstance(data, (dict, list)):
@@ -778,7 +1058,7 @@ class GolikeAuth:
                 )
                 send = data
             else:
-                raise TypeError("data must be dict/list/str/bytes")
+                raise TypeError("data must be a dict, list, str, or bytes")
             return (session or requests).request(
                 method_u,
                 self._url(path),

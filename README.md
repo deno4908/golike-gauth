@@ -4,66 +4,137 @@
 [![Python](https://img.shields.io/pypi/pyversions/golike-gauth.svg)](https://pypi.org/project/golike-gauth/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Client auth cho **Golike gateway API** — JWT + `g-device-id` / `t` (API 2026), tương thích legacy `g-auth` khi cần.
+Client auth for the **Golike gateway API** (2026): JWT + device headers, TikTok `sig` minting, optional legacy `g-auth`.
 
 **Repo:** https://github.com/deno4908/golike-gauth  
-**Version:** `0.1.6`
+**Version:** `0.1.8`
 
 ## Changelog
 
-### 0.1.6 (Golike API mới — 2026)
+### 0.1.8 — TikTok `sig` encryption overhaul (JS bundle 24/7)
 
-App Golike mới **không còn** `g-auth` và **không trả** `firebase_id` / `signing_key` từ `/users/me`.
+App no longer puts a locally encrypted blob directly into `sig`.  
+TikTok jobs use a **two-step security API** on `api.golike.net`, with a **new AES-GCM scheme** separate from gateway `g-auth`.
 
-Request thật (curl app) chỉ còn:
+#### Request flow
 
-| Header | Bắt buộc |
+```text
+JWT
+ │
+ ├─① POST https://api.golike.net/api/v1/security/session
+ │     body: {}
+ │     → { signing_key, exp, epoch, schemeVersion: "v3.2" }
+ │
+ ├─② POST https://api.golike.net/api/v1/security/token
+ │     body: { plt, act, req: { method, path, query, body } }
+ │     headers: Authorization, g-auth (sectoken scheme), g-device-id
+ │     → { token }   ← this value is the gateway header `sig`
+ │
+ └─③ GET  https://gateway.golike.net/api/advertising/publishers/tiktok/jobs?...
+       headers: Authorization, g-device-id, g-username, t, sig
+       (no g-auth on the gateway TikTok call)
+```
+
+Missing `sig` on TikTok jobs → HTTP **403**  
+`Vui lòng tải lại trang để cập nhật phiên bản mới nhất.`
+
+#### Two crypto schemes
+
+| | Gateway `g-auth` (legacy / optional) | Sectoken mint (`security/token`) |
+|---|---|---|
+| Used for | Optional gateway binding | Build `g-auth` **only** for step ② |
+| HKDF salt | `glk-gauth-v3-2026q3` | `glk-sectoken-v31-2026q3` |
+| HKDF info | `aes-gcm-key` | `aes-gcm-key-v31` |
+| Digest `r` | `sha256(t:deviceId:bodyHash:salt)[:16]` | `sha256(salt:t:userId:bodyHash)[:16]` |
+| Extra field | — | `r2 = sha256hex(deviceId\|METHOD\|path\|salt)[16:40]` |
+| Output header | `g-auth` | server returns `token` → client sends as **`sig`** |
+
+Cipher for both: **AES-256-GCM**, output `base64url(iv12 ‖ ciphertext+tag)`.
+
+Sectoken payload example (step ② `g-auth` plaintext):
+
+```json
+{
+  "t": 1784884100123,
+  "x": "<nonce b64url>",
+  "d": "<device-uuid>",
+  "u": 639111,
+  "n": "POST",
+  "k": "/api/v1/security/token",
+  "q": "<sha256 hex of mint body>",
+  "r": "<16 hex chars>",
+  "r2": "<24 hex chars>"
+}
+```
+
+Mint body (`req.path` is gateway pathname, including `/api/...`):
+
+```json
+{
+  "plt": "tiktok",
+  "act": "get_job",
+  "req": {
+    "method": "GET",
+    "path": "/api/advertising/publishers/tiktok/jobs",
+    "query": "account_id=711964&data=null",
+    "body": ""
+  }
+}
+```
+
+`act` mapping:
+
+| Gateway path contains | `act` |
 |---|---|
-| `Authorization: Bearer <JWT>` | ✅ |
-| `g-device-id` | ✅ UUID |
-| `g-username` | ✅ |
-| `t` | ✅ (triple-btoa timestamp) |
-| `g-auth` / `g-version` / `g-client` / `sig` | ❌ không dùng |
+| `/tiktok/jobs` (not skip) | `get_job` |
+| `/tiktok/complete-jobs` | `complete_job` |
 
-Thay đổi thư viện:
-
-- `GolikeAuth.from_token(token)` — **chỉ JWT**, không bắt `signing_key` / `firebase_id`.
-- `headers()` / `get` / `post` mặc định **không** gắn `g-auth`.
-- `enable_gauth=False` (mặc định). Bật legacy: `enable_gauth=True` + `signing_key=...`.
-- `verify` mặc định `False` (echo `/security/echo` chỉ khi legacy).
-- Export lại: `generate_g_auth`, `generate_device_id`, `build_headers`, `resolve_signing_key`, …
-- `auth.firebase_id` — alias optional (thường `None` trên API mới).
+#### Library API (0.1.8)
 
 ```python
 from golike_gauth import GolikeAuth
 
-auth = GolikeAuth.from_token("eyJ...")  # không cần signing_key
+auth = GolikeAuth.from_token("eyJ...")  # JWT only
+# 1) GET gateway /users/me
+# 2) POST security/session → signing_key
+# 3) on TikTok get/post: mint security/token → header sig
 
-print(auth.user_id, auth.username, auth.device_id)
-print(auth.signing_key)   # None trên API mới
-print("g-auth" in auth.headers("GET", "/users/me"))  # False
-
-# jobs 2026 (Facebook / multi)
-auth.get(
-    "/advertising/publishers/get-jobs-2026",
-    params={"fb_id": "6158...", "server": "sv2", "low_job": 1},
+r = auth.get(
+    "/advertising/publishers/tiktok/jobs",
+    params={"account_id": "711964", "data": "null"},
 )
-
-# path cũ vẫn gọi được (Bearer only)
-auth.get("/advertising/publishers/tiktok/jobs", params={"account_id": "1"})
-auth.post("/advertising/publishers/instagram/skip-jobs", json={...})
+print(r.status_code, r.json())
 ```
 
-**Legacy (opt-in)** — nếu gateway cũ còn bắt `g-auth`:
+Public helpers:
 
-```python
-auth = GolikeAuth.from_token(
-    "eyJ...",
-    signing_key="...",      # store.state.signing_key hoặc firebase_id cũ
-    enable_gauth=True,
-    verify=True,
-)
-```
+| Function | Role |
+|---|---|
+| `fetch_security_session(token)` | step ① |
+| `mint_security_token(...)` / `generate_sig(...)` | step ② |
+| `generate_sectoken_g_auth(...)` | local AES for step ② `g-auth` |
+| `generate_g_auth(...)` | legacy gateway scheme |
+| `auth.refresh_signing_key()` | refresh before `exp` |
+
+Constants: `SALT`, `SECTOKEN_SALT`, `SECURITY_API`, `APP_VERSION` (`26.07.24.1`).
+
+#### Breaking notes vs 0.1.6 / early 0.1.7
+
+- Do **not** put gateway-style `generate_g_auth(...)` into header `sig` — server rejects it.
+- Do **not** expect `firebase_id` from `/users/me`.
+- `signing_key` comes from **`security/session`**, not profile.
+- `sig` is a **server-minted** token from `security/token`, not a pure local encrypt of the jobs request.
+
+### 0.1.7
+
+- Auto `POST /security/session` in `from_token` (`fetch_session=True`).
+- `fetch_security_session` / `refresh_signing_key`.
+
+### 0.1.6
+
+- Default **no** gateway `g-auth` on normal requests.
+- Bearer + `g-device-id` + `g-username` + `t`.
+- `/users/me` without `firebase_id`.
 
 ### 0.1.5
 
