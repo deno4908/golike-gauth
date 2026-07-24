@@ -28,18 +28,13 @@ def main(argv: list[str] | None = None) -> int:
 
     enable_sig = True if args.enable_sig else (False if args.no_sig else None)
     try:
-        if args.signing_key:
-            # manual bootstrap nhe: from_token van goi /me neu muon day du
-            auth = GolikeAuth.from_token(
-                args.token,
-                signing_key=args.signing_key,
-                enable_sig=enable_sig,
-                verify=False,
-            )
-        else:
-            auth = GolikeAuth.from_token(
-                args.token, enable_sig=enable_sig, verify=False
-            )
+        auth = GolikeAuth.from_token(
+            args.token,
+            signing_key=args.signing_key,
+            enable_sig=enable_sig,
+            enable_gauth=bool(args.signing_key),
+            verify=False,
+        )
     except Exception as e:
         print("auth fail:", e, file=sys.stderr)
         return 1
@@ -47,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     headers = auth.headers(args.method, args.path, body="")
     print("user:", auth.username, auth.user_id)
     print("device:", auth.device_id)
-    print("g-auth:", headers["g-auth"][:48] + "...")
+    print("g-auth:", (headers.get("g-auth") or "(off — API moi)")[:48])
     if "sig" in headers:
         print("sig:", headers["sig"][:48] + "...")
     print("path:", normalize_path(args.path))

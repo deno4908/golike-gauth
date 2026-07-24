@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "golike-gauth"
-version = "0.1.5"
-description = "Generate valid g-auth / g-device-id headers for Golike gateway API"
+version = "0.1.6"
+description = "Golike gateway auth client (JWT + g-device-id; optional legacy g-auth)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"

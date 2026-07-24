@@ -94,6 +94,63 @@ def fetch_user_me(token: str, *, device_id: Optional[str] = None, timeout: float
     return data
 
 
+def resolve_signing_key(
+    profile: Optional[Mapping[str, Any]] = None,
+    *,
+    signing_key: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Lay signing_key / firebase_id tu profile /users/me.
+
+    App web: store.signing_key = data.firebase_id (khi co).
+    Thu nhieu field vi API doi ten theo thoi ky.
+    """
+    if signing_key and str(signing_key).strip():
+        cand = str(signing_key).strip()
+        try:
+            parse_signing_key(cand)
+            return cand
+        except ValueError:
+            pass
+
+    if not isinstance(profile, Mapping):
+        return None
+
+    # uu tien cac key thuong gap
+    keys = (
+        "firebase_id",
+        "signing_key",
+        "gauth_key",
+        "g_auth_key",
+        "store_signing_key",
+        "firebaseId",
+        "signingKey",
+    )
+    for key in keys:
+        val = profile.get(key)
+        if isinstance(val, str) and val.strip():
+            try:
+                parse_signing_key(val.strip())
+                return val.strip()
+            except ValueError:
+                continue
+
+    # nested: data.security / data.gauth
+    for nest_key in ("security", "gauth", "auth", "meta"):
+        nest = profile.get(nest_key)
+        if not isinstance(nest, Mapping):
+            continue
+        for key in keys:
+            val = nest.get(key)
+            if isinstance(val, str) and val.strip():
+                try:
+                    parse_signing_key(val.strip())
+                    return val.strip()
+                except ValueError:
+                    continue
+    return None
+
+
 def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
@@ -348,11 +405,11 @@ def decode_g_auth(token: str, signing_key: str) -> dict:
 def build_headers(
     *,
     token: str,
-    signing_key: str,
-    user_id: int,
-    username: str,
-    method: str,
-    path: str,
+    signing_key: Optional[str] = None,
+    user_id: int = 0,
+    username: str = "",
+    method: str = "GET",
+    path: str = "/",
     body: JsonBody = None,
     device_id: Optional[str] = None,
     g_version: str = APP_VERSION,
@@ -360,34 +417,27 @@ def build_headers(
     user_agent: Optional[str] = None,
     extra: Optional[Mapping[str, str]] = None,
     with_sig: Optional[bool] = None,
+    with_gauth: Optional[bool] = None,
+    legacy_client_headers: bool = False,
 ) -> dict:
     """
-    Build request headers with fresh g-auth / g-device-id / t.
-    Auto them header `sig` cho path TikTok (/tiktok/jobs, /tiktok/complete-jobs)
-    neu with_sig is True hoac None (auto).
+    Build gateway headers.
+
+    **Golike moi (2026):** chi can Bearer + g-device-id + g-username + t
+    (khong g-auth, khong firebase_id, khong g-version/g-client) — giong curl app.
+
+    **Legacy:** neu co signing_key va with_gauth=True (hoac auto khi co key
+    + legacy_client_headers) thi them g-auth / sig.
     """
     did = generate_device_id(device_id)
-    # GET/HEAD/DELETE in app use body "" for signing
     sign_body: JsonBody = "" if body is None else body
-    g_auth = generate_g_auth(
-        method=method,
-        path=path,
-        body=sign_body,
-        signing_key=signing_key,
-        device_id=did,
-        user_id=int(user_id),
-    )
     ua = user_agent or MOBILE_UA
     headers = {
         "accept": "application/json, text/plain, */*",
         "accept-language": "vi,en-US;q=0.9,en;q=0.8",
         "authorization": f"Bearer {token}",
         "content-type": "application/json;charset=utf-8",
-        "g-auth": g_auth,
         "g-device-id": did,
-        "g-username": username,
-        "g-version": g_version,
-        "g-client": g_client,
         "origin": "https://app.golike.net",
         "referer": "https://app.golike.net/",
         "t": make_t_header(),
@@ -399,55 +449,85 @@ def build_headers(
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
     }
-    # TikTok platform sig (cA/W_)
-    need_sig = with_sig if with_sig is not None else (
-        resolve_tiktok_sig_act(path) is not None
-    )
-    if need_sig:
-        sig = generate_sig(
+    if username:
+        headers["g-username"] = username
+
+    sk = (signing_key or "").strip() or None
+    # Mac dinh: KHONG gui g-auth (API moi). Chi bat khi with_gauth=True
+    # hoac with_gauth=None + legacy_client_headers + co signing_key.
+    use_gauth = False
+    if with_gauth is True:
+        use_gauth = True
+    elif with_gauth is False:
+        use_gauth = False
+    elif legacy_client_headers and sk:
+        use_gauth = True
+
+    if use_gauth:
+        if not sk:
+            raise ValueError("with_gauth=True can signing_key/firebase_id")
+        headers["g-auth"] = generate_g_auth(
             method=method,
             path=path,
             body=sign_body,
-            signing_key=signing_key,
+            signing_key=sk,
             device_id=did,
-            user_id=int(user_id),
+            user_id=int(user_id or 0),
         )
-        if sig:
-            headers["sig"] = sig
+        if legacy_client_headers:
+            headers["g-version"] = g_version
+            headers["g-client"] = g_client
+        need_sig = with_sig if with_sig is not None else (
+            resolve_tiktok_sig_act(path) is not None
+        )
+        if need_sig:
+            sig = generate_sig(
+                method=method,
+                path=path,
+                body=sign_body,
+                signing_key=sk,
+                device_id=did,
+                user_id=int(user_id or 0),
+            )
+            if sig:
+                headers["sig"] = sig
     if extra:
         headers.update(dict(extra))
     return headers
 
 
 class GolikeAuth:
-    """Reusable helper that keeps token / signing_key / device_id."""
+    """Auth helper — Golike moi: chi JWT + device_id (khong bat g-auth)."""
 
     def __init__(
         self,
         *,
         token: str,
-        signing_key: str,
-        user_id: int,
-        username: str,
+        signing_key: Optional[str] = None,
+        user_id: int = 0,
+        username: str = "",
         device_id: Optional[str] = None,
         g_version: str = APP_VERSION,
         g_client: str = APP_CLIENT,
         base_url: str = BASE_API,
         user_agent: Optional[str] = None,
         enable_sig: Optional[bool] = None,
+        enable_gauth: Optional[bool] = None,
     ) -> None:
         self.token = token
-        self.signing_key = signing_key
-        self.user_id = int(user_id)
-        self.username = username
+        self.signing_key = (signing_key or "").strip() or None
+        self.user_id = int(user_id or 0)
+        self.username = username or ""
         self.device_id = generate_device_id(device_id)
         self.g_version = g_version
         self.g_client = g_client
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent or MOBILE_UA
-        self.profile: dict = {}  # raw /users/me data (neu co)
-        # None = auto (chi TikTok jobs/complete), True = luon gen, False = tat
+        self.profile: dict = {}
+        # None = auto path TikTok (chi khi enable_gauth), True/False force
         self.enable_sig = enable_sig
+        # None/False = API moi (khong g-auth). True = legacy AES g-auth
+        self.enable_gauth = enable_gauth if enable_gauth is not None else False
 
     # ------------------------------------------------------------------
     # Bootstrap tu token
@@ -460,29 +540,22 @@ class GolikeAuth:
         signing_key: Optional[str] = None,
         device_id: Optional[str] = None,
         username: Optional[str] = None,
-        verify: bool = True,
+        verify: bool = False,
         enable_sig: Optional[bool] = None,
+        enable_gauth: Optional[bool] = None,
         timeout: float = 30,
     ) -> "GolikeAuth":
         """
-        Chi can JWT token — lay user_id / username / (signing_key) tu API.
+        Chi can JWT token.
 
-        Flow:
-          1. Decode JWT → user_id (sub)
-          2. GET /users/me (UA mobile) → username, coin, firebase_id, ...
-          3. signing_key:
-               - neu truyen vao → dung
-               - else thu data.firebase_id (app set_signing_key(firebase_id))
-               - verify qua POST /security/echo (neu verify=True)
-          4. device_id: truyen vao hoac random UUID
+        Golike moi (2026):
+          - GET /users/me **khong** tra firebase_id
+          - Request **khong** can g-auth / sig
+          - Chi Bearer + g-device-id + g-username + t
 
-        enable_sig:
-          None  = auto (chi path TikTok jobs/complete-jobs)
-          True  = luon gen header sig
-          False = tat sig
-
-        Luu y: mot so acc firebase_id != store.signing_key → can truyen
-        signing_key thu cong (console: store.state.signing_key).
+        Legacy (opt-in):
+          - enable_gauth=True + signing_key/firebase_id
+          - verify=True goi /security/echo
         """
         token = (token or "").strip()
         if token.lower().startswith("bearer "):
@@ -492,21 +565,15 @@ class GolikeAuth:
 
         me = fetch_user_me(token, device_id=did, timeout=timeout)
         uname = (username or me.get("username") or me.get("name") or "user").strip()
-        sk = (signing_key or "").strip() or None
-        if not sk:
-            # App: e.signing_key = firebase_id (khi co)
-            cand = me.get("firebase_id")
-            if cand and isinstance(cand, str) and cand.strip():
-                sk = cand.strip()
 
-        if not sk:
+        # Optional legacy key — khong bat buoc
+        sk = resolve_signing_key(me, signing_key=signing_key)
+        use_gauth = bool(enable_gauth) if enable_gauth is not None else False
+        if use_gauth and not sk:
             raise ValueError(
-                "API /users/me khong co firebase_id/signing_key. "
-                "Truyen signing_key= store.state.signing_key tu browser."
+                "enable_gauth=True nhung khong co firebase_id/signing_key. "
+                "API moi khong can g-auth — bo enable_gauth hoac truyen signing_key."
             )
-
-        # Validate key 32 bytes
-        parse_signing_key(sk)
 
         auth = cls(
             token=token,
@@ -516,28 +583,44 @@ class GolikeAuth:
             device_id=did,
             user_agent=MOBILE_UA,
             enable_sig=enable_sig,
+            enable_gauth=use_gauth,
         )
-        auth.profile = me
+        auth.profile = dict(me)
 
-        if verify:
+        if verify and use_gauth and sk:
             ok, detail = auth.verify_signing_key(timeout=timeout)
             if not ok:
                 raise ValueError(
-                    "signing_key (firebase_id) server decrypt_fail. "
-                    "Hay lay store.state.signing_key tu browser va truyen signing_key=... "
+                    "signing_key server decrypt_fail. "
                     f"detail={detail}"
                 )
         return auth
 
+    @property
+    def firebase_id(self) -> Optional[str]:
+        """Legacy alias — API moi thuong None."""
+        if self.signing_key:
+            return self.signing_key
+        val = (self.profile or {}).get("firebase_id")
+        return str(val).strip() if val else None
+
+    @firebase_id.setter
+    def firebase_id(self, value: Optional[str]) -> None:
+        self.signing_key = (value or "").strip() or None
+
     def verify_signing_key(self, timeout: float = 30) -> tuple:
         """
-        POST /security/echo de xac nhan signing_key.
+        POST /security/echo (legacy). API moi khong can.
         Returns (ok: bool, detail: dict|str)
         """
         import requests
 
+        if not self.signing_key:
+            return False, "no signing_key"
         body = json.dumps({"ping": 1}, separators=(",", ":"))
-        headers = self.headers("POST", "/security/echo", body=body)
+        headers = self.headers(
+            "POST", "/security/echo", body=body, with_gauth=True
+        )
         try:
             resp = requests.post(
                 f"{self.base_url}/security/echo",
@@ -551,7 +634,6 @@ class GolikeAuth:
 
         msg = str(data.get("message") or data.get("error") or "")
         if data.get("code") == 429 or "429" in msg or "qua nhanh" in msg.lower():
-            # rate-limit: khong ket luan key sai
             return True, {"rate_limited": True, "message": msg}
 
         g = {}
@@ -579,6 +661,11 @@ class GolikeAuth:
         body: JsonBody = None,
         ts_ms: Optional[int] = None,
     ) -> str:
+        if not self.signing_key:
+            raise ValueError(
+                "API moi khong dung g-auth (khong co signing_key/firebase_id). "
+                "Chi can auth.headers() / auth.get() / auth.post()."
+            )
         return generate_g_auth(
             method=method,
             path=path,
@@ -597,9 +684,10 @@ class GolikeAuth:
         body: JsonBody = None,
         extra: Optional[Mapping[str, str]] = None,
         with_sig: Optional[bool] = None,
+        with_gauth: Optional[bool] = None,
     ) -> dict:
-        # with_sig arg uu tien; else dung self.enable_sig
         sig_flag = self.enable_sig if with_sig is None else with_sig
+        gauth_flag = self.enable_gauth if with_gauth is None else with_gauth
         return build_headers(
             token=self.token,
             signing_key=self.signing_key,
@@ -614,9 +702,13 @@ class GolikeAuth:
             user_agent=self.user_agent,
             extra=extra,
             with_sig=sig_flag,
+            with_gauth=gauth_flag,
+            legacy_client_headers=bool(gauth_flag),
         )
 
     def decode(self, g_auth_token: str) -> dict:
+        if not self.signing_key:
+            raise ValueError("khong co signing_key de decode g-auth")
         return decode_g_auth(g_auth_token, self.signing_key)
 
     def _url(self, path: str) -> str:

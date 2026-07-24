@@ -4,81 +4,113 @@
 [![Python](https://img.shields.io/pypi/pyversions/golike-gauth.svg)](https://pypi.org/project/golike-gauth/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Generate valid **`g-auth`** / **`g-device-id`** (và **`sig`** TikTok) headers cho Golike gateway API.
+Client auth cho **Golike gateway API** — JWT + `g-device-id` / `t` (API 2026), tương thích legacy `g-auth` khi cần.
 
 **Repo:** https://github.com/deno4908/golike-gauth  
-**Version hiện tại (source):** `0.1.5` — PyPI có thể còn `0.1.3` nếu chưa upload.
+**Version:** `0.1.6`
 
 ## Changelog
 
-### 0.1.5 (mới — chưa / sắp lên PyPI)
+### 0.1.6 (Golike API mới — 2026)
 
-- **Gỡ helper theo platform** (`get_instagram_job`, `get_tiktok_job`, `complete_*`, `skip_*`…).
-- **Auth dùng chung:** chỉ còn `from_token` + `get` / `post` / `put` / `delete` / `request` / `headers`.
-- Gọi API mọi platform theo path, ví dụ:
-  ```python
-  auth.get("/advertising/publishers/tiktok/jobs", params={"account_id": "1", "data": "null"})
-  auth.post("/advertising/publishers/instagram/skip-jobs", json={...})
-  ```
-- CLI gọn: bootstrap bằng token, tuỳ chọn `--enable-sig` / `--no-sig`.
+App Golike mới **không còn** `g-auth` và **không trả** `firebase_id` / `signing_key` từ `/users/me`.
+
+Request thật (curl app) chỉ còn:
+
+| Header | Bắt buộc |
+|---|---|
+| `Authorization: Bearer <JWT>` | ✅ |
+| `g-device-id` | ✅ UUID |
+| `g-username` | ✅ |
+| `t` | ✅ (triple-btoa timestamp) |
+| `g-auth` / `g-version` / `g-client` / `sig` | ❌ không dùng |
+
+Thay đổi thư viện:
+
+- `GolikeAuth.from_token(token)` — **chỉ JWT**, không bắt `signing_key` / `firebase_id`.
+- `headers()` / `get` / `post` mặc định **không** gắn `g-auth`.
+- `enable_gauth=False` (mặc định). Bật legacy: `enable_gauth=True` + `signing_key=...`.
+- `verify` mặc định `False` (echo `/security/echo` chỉ khi legacy).
+- Export lại: `generate_g_auth`, `generate_device_id`, `build_headers`, `resolve_signing_key`, …
+- `auth.firebase_id` — alias optional (thường `None` trên API mới).
+
+```python
+from golike_gauth import GolikeAuth
+
+auth = GolikeAuth.from_token("eyJ...")  # không cần signing_key
+
+print(auth.user_id, auth.username, auth.device_id)
+print(auth.signing_key)   # None trên API mới
+print("g-auth" in auth.headers("GET", "/users/me"))  # False
+
+# jobs 2026 (Facebook / multi)
+auth.get(
+    "/advertising/publishers/get-jobs-2026",
+    params={"fb_id": "6158...", "server": "sv2", "low_job": 1},
+)
+
+# path cũ vẫn gọi được (Bearer only)
+auth.get("/advertising/publishers/tiktok/jobs", params={"account_id": "1"})
+auth.post("/advertising/publishers/instagram/skip-jobs", json={...})
+```
+
+**Legacy (opt-in)** — nếu gateway cũ còn bắt `g-auth`:
+
+```python
+auth = GolikeAuth.from_token(
+    "eyJ...",
+    signing_key="...",      # store.state.signing_key hoặc firebase_id cũ
+    enable_gauth=True,
+    verify=True,
+)
+```
+
+### 0.1.5
+
+- Gỡ helper theo platform (`get_instagram_job`, `get_tiktok_job`, …).
+- Auth dùng chung: `from_token` + `get` / `post` / `put` / `delete` / `request` / `headers`.
 
 ### 0.1.4
 
-- Thêm **`enable_sig`** trên `GolikeAuth` / `from_token`:
-  - `None` = auto (chỉ path TikTok jobs/complete)
-  - `True` = bật `sig`
-  - `False` = tắt `sig`
-- Có thể ghi đè từng request: `auth.get(path, with_sig=True)`.
+- `enable_sig` trên `GolikeAuth` / `from_token` (TikTok `sig`).
 
 ### 0.1.3
 
-- Header **`sig`** cho TikTok (`generate_sig`, auto gắn khi path khớp).
-- `build_headers` / `request` gộp query vào path khi ký `sig`.
-- Helper TikTok (đã **gỡ ở 0.1.5** — dùng `get`/`post` chung).
+- Header `sig` TikTok; gộp query vào path khi ký.
 
 ### 0.1.2
 
-- **`GolikeAuth.from_token(token)`** — chỉ cần JWT:
-  - `user_id` từ JWT `sub`
-  - `username` / profile từ `GET /users/me` (User-Agent **mobile**)
-  - `signing_key` mặc định = `data.firebase_id`
-  - `device_id` tự sinh UUID
-- Hằng `MOBILE_UA`, `fetch_user_me`, `jwt_user_id`.
-- `verify=True/False` khi bootstrap (echo check).
+- `from_token(token)` bootstrap `/users/me` + `firebase_id` (API cũ).
 
 ### 0.1.1 / 0.1.0
 
-- Core: HKDF + AES-GCM `g-auth`, `g-device-id`, header `t`.
-- `GolikeAuth` request ký body compact (không space).
-- Fix `g-version` / `g-client` đúng app web.
+- HKDF + AES-GCM `g-auth`, `g-device-id`, header `t`.
 
-### Nâng cấp từ 0.1.3
+### Nâng cấp
 
 ```bash
-pip install -U golike-gauth
-# hoặc local:
-pip install -e ".[requests]"
+pip install -U "golike-gauth[requests]"
 ```
 
-**Breaking (0.1.5):** nếu code cũ gọi `auth.get_tiktok_job(...)` / `get_instagram_job(...)` → đổi sang `auth.get(...)` / `auth.post(...)` như trên.
+**Breaking (0.1.6):** mặc định **không** sinh `g-auth`. Code cũ dựa vào `auth.signing_key` / `auth.g_auth()` bắt buộc → truyền `enable_gauth=True` + `signing_key`, hoặc bỏ hẳn (API mới không cần).
+
+**Breaking (0.1.5):** `get_tiktok_job` / `get_instagram_job` → dùng `auth.get` / `auth.post`.
 
 ## Install
 
 ```bash
-pip install golike-gauth
+pip install -U golike-gauth
 
-# optional: HTTP helper (requests)
-pip install "golike-gauth[requests]"
+# HTTP helper (requests) — khuyến nghị
+pip install -U "golike-gauth[requests]"
 
-# ban moi nhat tu GitHub (neu PyPI chua cap nhat)
+# từ GitHub
 pip install -U git+https://github.com/deno4908/golike-gauth.git
 ```
 
 ## Quick start
 
-### Chỉ cần token (khuyến dùng)
-
-Hầu hết trường hợp **chỉ nhập JWT**. Các tham số còn lại lấy từ API (User-Agent **mobile**).
+### Chỉ cần token (API 2026 — khuyến dùng)
 
 ```python
 from golike_gauth import GolikeAuth
@@ -88,7 +120,7 @@ auth = GolikeAuth.from_token("eyJ...")  # chỉ token
 print(auth.user_id)       # JWT sub
 print(auth.username)      # /users/me
 print(auth.device_id)     # UUID tự sinh
-print(auth.signing_key)   # = data.firebase_id (app web cũng set như vậy)
+print(auth.signing_key)   # None (API mới không firebase_id)
 print(auth.profile)       # raw /users/me
 ```
 
@@ -97,22 +129,21 @@ print(auth.profile)       # raw /users/me
 | Bước | Nguồn | Kết quả |
 |---|---|---|
 | 1 | Decode JWT | `user_id` = `sub` |
-| 2 | `GET /users/me` (UA mobile Android) | `username`, `coin`, `firebase_id`, … |
-| 3 | `signing_key` | mặc định = **`data.firebase_id`** (trùng `store.state.signing_key` trên app) |
-| 4 | `device_id` | UUID v4 (tự tạo, nên lưu lại) |
-| 5 | (tuỳ chọn) `verify=True` | `POST /security/echo` kiểm tra key decrypt được |
+| 2 | `GET /users/me` (UA mobile) | `username`, `coin`, profile… (**không** `firebase_id`) |
+| 3 | `signing_key` | `None` (API mới) — chỉ set nếu `enable_gauth=True` |
+| 4 | `device_id` | UUID v4 (tự tạo) |
+| 5 | Headers | Bearer + `g-device-id` + `g-username` + `t` — **không** `g-auth` |
 
 ```python
-# verify echo (mac dinh True) — fail neu key sai
-auth = GolikeAuth.from_token("eyJ...", verify=True)
+# mac dinh API moi
+auth = GolikeAuth.from_token("eyJ...")
 
-# bo qua verify echo
-auth = GolikeAuth.from_token("eyJ...", verify=False)
-
-# hiếm khi firebase_id != store key → truyền tay:
+# legacy g-auth (hiếm)
 auth = GolikeAuth.from_token(
     "eyJ...",
-    signing_key="cxbbf6td1EXc...",  # store.state.signing_key
+    signing_key="cxbbf6td1EXc...",
+    enable_gauth=True,
+    verify=True,
 )
 ```
 
@@ -123,25 +154,20 @@ Trên https://app.golike.net (đã login, F12 → Network):
 - Request bất kỳ → header `Authorization: Bearer eyJ...`
 - Hoặc Application / Local Storage / vuex (field `token`)
 
-`signing_key` thường **không cần** dán: app gán `store.signing_key = me.firebase_id`.
-
 #### Ví dụ: lấy job Facebook chỉ với token
 
 ```python
 from golike_gauth import GolikeAuth
 
-auth = GolikeAuth.from_token("eyJ...", verify=False)
-# dam bao dung firebase_id
-if auth.profile.get("firebase_id"):
-    auth.signing_key = auth.profile["firebase_id"]
+auth = GolikeAuth.from_token("eyJ...")
 
 # list account FB tren Golike
-accs = auth.get("/fb-account?limit=200").json().get("data") or []
+accs = auth.get("/fb-account", params={"limit": 200}).json().get("data") or []
 fb_id = accs[0]["fb_id"]
 
 r = auth.get(
-    f"/advertising/publishers/get-jobs-2026"
-    f"?fb_id={fb_id}&server=sv2&high_job=1&low_job=1"
+    "/advertising/publishers/get-jobs-2026",
+    params={"fb_id": fb_id, "server": "sv2", "high_job": 1, "low_job": 1},
 )
 print(r.status_code, r.json())
 ```
